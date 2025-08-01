@@ -59,6 +59,7 @@ class TestDocumentEndpoints:
         """Test successful document upload"""
         # Mock the retriever
         mock_retriever.add_document = AsyncMock(return_value="doc123")
+        mock_retriever.get_document_info.return_value = {"chunks": 5}
         
         # Create test file
         file_content = b"This is a test document"
@@ -69,6 +70,7 @@ class TestDocumentEndpoints:
         data = response.json()
         assert data["document_id"] == "doc123"
         assert data["status"] == "processed"
+        assert data["chunks_created"] == 5
     
     def test_upload_document_invalid_type(self, client):
         """Test document upload with invalid file type"""

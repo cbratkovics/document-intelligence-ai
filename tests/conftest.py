@@ -26,6 +26,28 @@ sys.modules['langchain_openai'] = MagicMock()
 sys.modules['langchain_openai'].OpenAIEmbeddings = MagicMock(return_value=mock_embeddings_instance)
 sys.modules['langchain_openai'].ChatOpenAI = MagicMock(return_value=mock_chat_instance)
 
+# Also mock ChromaDB to prevent actual vector store operations
+mock_collection = MagicMock()
+# Make add method handle proper parameters
+def mock_add(documents=None, embeddings=None, metadatas=None, ids=None):
+    return None
+mock_collection.add = MagicMock(side_effect=mock_add)
+mock_collection.query.return_value = {
+    'documents': [["Test content"]],
+    'distances': [[0.1]],
+    'metadatas': [[{"doc_id": "test_doc"}]],
+    'ids': [["test_id"]]
+}
+mock_collection.get.return_value = {'ids': ['test_id'], 'documents': ['Test content']}
+mock_collection.delete.return_value = None
+mock_collection.count.return_value = 1
+
+mock_chroma_client = MagicMock()
+mock_chroma_client.get_or_create_collection.return_value = mock_collection
+
+sys.modules['chromadb'] = MagicMock()
+sys.modules['chromadb'].Client = MagicMock(return_value=mock_chroma_client)
+
 
 @pytest.fixture(autouse=True)
 def mock_openai():
@@ -35,12 +57,17 @@ def mock_openai():
     mock_embeddings_instance.embed_query.return_value = [0.1] * 1536
     mock_chat_instance.ainvoke.return_value.content = "Test response"
     
-    yield {
-        'embeddings': sys.modules['langchain_openai'].OpenAIEmbeddings,
-        'chat': sys.modules['langchain_openai'].ChatOpenAI,
-        'embeddings_instance': mock_embeddings_instance,
-        'chat_instance': mock_chat_instance
-    }
+    # Patch VectorStore globally for integration tests
+    with patch('src.core.vector_store.chromadb.Client') as mock_chromadb:
+        mock_chromadb.return_value = mock_chroma_client
+        
+        yield {
+            'embeddings': sys.modules['langchain_openai'].OpenAIEmbeddings,
+            'chat': sys.modules['langchain_openai'].ChatOpenAI,
+            'embeddings_instance': mock_embeddings_instance,
+            'chat_instance': mock_chat_instance,
+            'chromadb': mock_chromadb
+        }
 
 
 @pytest.fixture
@@ -89,7 +116,7 @@ def mock_vector_store():
     with patch('src.core.vector_store.VectorStore') as mock_store:
         store = mock_store.return_value
         # Match the actual signature: add_documents(documents: List[str], metadatas: List[Dict[str, Any]], ids: Optional[List[str]] = None)
-        store.add_documents = Mock(side_effect=lambda documents, metadatas, ids=None: None)
+        store.add_documents = Mock(side_effect=lambda documents, metadatas, ids=None: ids or [f"id_{i}" for i in range(len(documents))])
         store.search = Mock(return_value=[
             {
                 "content": "Test content",
