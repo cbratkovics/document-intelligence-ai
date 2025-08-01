@@ -40,8 +40,8 @@ class Settings(BaseSettings):
     similarity_threshold: float = Field(default=0.7, env="SIMILARITY_THRESHOLD")
     
     # Paths
-    data_dir: str = Field(default="/app/data", env="DATA_DIR")
-    log_dir: str = Field(default="/app/logs", env="LOG_DIR")
+    data_dir: str = Field(default="./data", env="DATA_DIR")
+    log_dir: str = Field(default="./logs", env="LOG_DIR")
     
     class Config:
         env_file = ".env"
