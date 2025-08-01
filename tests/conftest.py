@@ -1,31 +1,45 @@
 import pytest
 import os
-from unittest.mock import patch, Mock, AsyncMock
+import sys
+from unittest.mock import patch, Mock, AsyncMock, MagicMock
 from typing import Generator
 import tempfile
 import shutil
 from pathlib import Path
 
-# Set test environment variables
+# Set test environment variables BEFORE any imports
 os.environ['OPENAI_API_KEY'] = 'test-key'
 os.environ['APP_ENV'] = 'testing'
+
+# Create mock OpenAI classes before they're imported
+mock_embeddings_instance = MagicMock()
+mock_embeddings_instance.embed_documents.return_value = [[0.1] * 1536]
+mock_embeddings_instance.embed_query.return_value = [0.1] * 1536
+
+mock_chat_instance = MagicMock()
+mock_chat_instance.ainvoke = AsyncMock()
+mock_chat_instance.ainvoke.return_value.content = "Test response"
+
+# Patch at module level before imports
+sys.modules['langchain_openai'] = MagicMock()
+sys.modules['langchain_openai'].OpenAIEmbeddings = MagicMock(return_value=mock_embeddings_instance)
+sys.modules['langchain_openai'].ChatOpenAI = MagicMock(return_value=mock_chat_instance)
 
 
 @pytest.fixture(autouse=True)
 def mock_openai():
-    """Mock OpenAI API calls"""
-    with patch('langchain_openai.OpenAIEmbeddings') as mock_embeddings:
-        with patch('langchain_openai.ChatOpenAI') as mock_chat:
-            # Configure mocks
-            mock_embeddings.return_value.embed_documents.return_value = [[0.1] * 1536]
-            mock_embeddings.return_value.embed_query.return_value = [0.1] * 1536
-            
-            mock_chat.return_value.ainvoke.return_value.content = "Test response"
-            
-            yield {
-                'embeddings': mock_embeddings,
-                'chat': mock_chat
-            }
+    """Ensure OpenAI mocks are properly configured"""
+    # The mocks are already set at module level, but we can reconfigure if needed
+    mock_embeddings_instance.embed_documents.return_value = [[0.1] * 1536]
+    mock_embeddings_instance.embed_query.return_value = [0.1] * 1536
+    mock_chat_instance.ainvoke.return_value.content = "Test response"
+    
+    yield {
+        'embeddings': sys.modules['langchain_openai'].OpenAIEmbeddings,
+        'chat': sys.modules['langchain_openai'].ChatOpenAI,
+        'embeddings_instance': mock_embeddings_instance,
+        'chat_instance': mock_chat_instance
+    }
 
 
 @pytest.fixture
@@ -89,6 +103,6 @@ def mock_embedding_service():
     """Mock embedding service"""
     with patch('src.core.embeddings.EmbeddingService') as mock_service:
         service = mock_service.return_value
-        service.generate_embedding = Mock(return_value=[0.1] * 1536)
+        service.embed_query = Mock(return_value=[0.1] * 1536)
         service.embed_documents = Mock(return_value=[[0.1] * 1536] * 10)
         yield service

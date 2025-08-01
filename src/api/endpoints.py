@@ -21,7 +21,7 @@ router = APIRouter()
 # Pydantic models for request/response
 class QueryRequest(BaseModel):
     """Query request model"""
-    text: str = Field(..., description="Query text")
+    text: str = Field(..., min_length=1, description="Query text")
     top_k: Optional[int] = Field(default=5, description="Number of results to return")
     filters: Optional[Dict[str, Any]] = Field(default=None, description="Metadata filters")
     stream: Optional[bool] = Field(default=False, description="Stream the response")
@@ -29,7 +29,7 @@ class QueryRequest(BaseModel):
 
 class AdvancedSearchRequest(BaseModel):
     """Advanced search request model"""
-    text: str = Field(..., description="Search query text")
+    text: str = Field(..., min_length=1, description="Search query text")
     top_k: Optional[int] = Field(default=10, description="Number of results to return")
     use_hybrid: Optional[bool] = Field(default=True, description="Use hybrid search (vector + keyword)")
     use_reranker: Optional[bool] = Field(default=True, description="Use cross-encoder reranking")
