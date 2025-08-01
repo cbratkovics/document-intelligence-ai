@@ -73,7 +73,6 @@ async def upload_document(
             )
         
         # Parse metadata if provided
-        import json
         metadata_dict = json.loads(metadata) if metadata else {}
         
         # Add document
