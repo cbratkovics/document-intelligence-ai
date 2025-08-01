@@ -8,7 +8,7 @@ import numpy as np
 # Mock the services for performance testing
 with patch.dict('os.environ', {'OPENAI_API_KEY': 'test-key'}):
     from src.core.embeddings import EmbeddingService
-    from src.core.chunking import ChunkingService
+    from src.core.chunking import DocumentChunker
     from src.rag.retriever import RAGRetriever
     from src.rag.generator import RAGGenerator
 
@@ -34,7 +34,7 @@ class TestPerformance:
     
     def test_chunking_performance(self):
         """Test chunking speed for large documents"""
-        service = ChunkingService()
+        service = DocumentChunker()
         
         # Create a large document (100KB)
         large_text = "This is a test sentence. " * 4000
@@ -109,7 +109,7 @@ class TestPerformance:
             documents = [f"Document {i} content " * 100 for i in range(100)]
             
             service = EmbeddingService()
-            chunking_service = ChunkingService()
+            chunking_service = DocumentChunker()
             
             for doc in documents:
                 chunks = chunking_service.chunk_text(doc)
