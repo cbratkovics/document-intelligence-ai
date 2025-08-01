@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Body
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Body, Path
 from fastapi.responses import StreamingResponse
 from typing import List, Optional, Dict, Any
 import logging
@@ -8,6 +8,10 @@ from pydantic import BaseModel, Field
 from ..rag.retriever import RAGRetriever
 from ..rag.generator import RAGGenerator
 from ..core.config import settings
+from .examples import (
+    query_examples, advanced_search_examples, 
+    upload_examples, response_examples
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,16 @@ class QueryRequest(BaseModel):
     top_k: Optional[int] = Field(default=5, description="Number of results to return")
     filters: Optional[Dict[str, Any]] = Field(default=None, description="Metadata filters")
     stream: Optional[bool] = Field(default=False, description="Stream the response")
+
+
+class AdvancedSearchRequest(BaseModel):
+    """Advanced search request model"""
+    text: str = Field(..., description="Search query text")
+    top_k: Optional[int] = Field(default=10, description="Number of results to return")
+    use_hybrid: Optional[bool] = Field(default=True, description="Use hybrid search (vector + keyword)")
+    use_reranker: Optional[bool] = Field(default=True, description="Use cross-encoder reranking")
+    alpha: Optional[float] = Field(default=0.7, ge=0.0, le=1.0, description="Weight for vector search in hybrid mode")
+    filters: Optional[Dict[str, Any]] = Field(default=None, description="Metadata filters")
 
 
 class QueryResponse(BaseModel):
@@ -44,16 +58,33 @@ retriever = RAGRetriever()
 generator = RAGGenerator()
 
 
-@router.post("/documents/upload", response_model=Dict[str, str])
+@router.post(
+    "/documents/upload",
+    response_model=Dict[str, str],
+    tags=["documents"],
+    summary="Upload a document",
+    responses=response_examples
+)
 async def upload_document(
-    file: UploadFile = File(...),
-    metadata: Optional[str] = None
+    file: UploadFile = File(..., description="Document file to upload"),
+    metadata: Optional[str] = Body(None, description="JSON metadata string", examples=upload_examples)
 ):
     """
-    Upload a document for processing
+    Upload a document for processing and indexing.
     
-    - **file**: Document file (PDF, TXT, MD, RST)
-    - **metadata**: Optional JSON metadata string
+    Supported file types:
+    - PDF (.pdf)
+    - Text (.txt)
+    - Markdown (.md)
+    - reStructuredText (.rst)
+    
+    Maximum file size: 10MB
+    
+    The document will be:
+    1. Validated for type and size
+    2. Chunked into smaller segments
+    3. Embedded using OpenAI embeddings
+    4. Indexed for vector and keyword search
     """
     try:
         # Validate file size
@@ -98,12 +129,27 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/query", response_model=QueryResponse)
-async def query_documents(request: QueryRequest):
+@router.post(
+    "/query",
+    response_model=QueryResponse,
+    tags=["query"],
+    summary="Generate answer using RAG",
+    responses=response_examples,
+    response_model_exclude_none=True
+)
+async def query_documents(
+    request: QueryRequest = Body(..., examples=query_examples)
+):
     """
-    Query documents and get AI-generated answers
+    Query documents and generate answers using RAG.
     
-    Returns answers based on the document context
+    This endpoint:
+    1. Performs semantic search to find relevant documents
+    2. Uses advanced search with hybrid mode and reranking
+    3. Generates a comprehensive answer using GPT-4
+    4. Returns source documents for transparency
+    
+    For streaming responses, set `stream=true` in the request.
     """
     try:
         # Generate answer
@@ -172,6 +218,55 @@ async def search_documents(request: QueryRequest):
         
     except Exception as e:
         logger.error(f"Error searching documents: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/search/advanced",
+    tags=["search"],
+    summary="Advanced document search",
+    description="Perform advanced search with hybrid mode and reranking options",
+    responses=response_examples
+)
+async def advanced_search(
+    request: AdvancedSearchRequest = Body(..., examples=advanced_search_examples)
+):
+    """
+    Advanced search with customizable search strategies.
+    
+    Features:
+    - **Hybrid Search**: Combines vector embeddings with BM25 keyword search
+    - **Cross-Encoder Reranking**: Uses LLM to rerank results for better relevance
+    - **Configurable Weights**: Adjust balance between semantic and keyword matching
+    
+    Parameters:
+    - **use_hybrid**: Enable hybrid search (vector + BM25)
+    - **use_reranker**: Enable cross-encoder reranking
+    - **alpha**: Weight for vector search (0=keyword only, 1=vector only)
+    """
+    try:
+        results = await retriever.advanced_search(
+            query=request.text,
+            top_k=request.top_k,
+            use_hybrid=request.use_hybrid,
+            use_reranker=request.use_reranker,
+            alpha=request.alpha,
+            filters=request.filters
+        )
+        
+        return {
+            "query": request.text,
+            "results": results,
+            "total": len(results),
+            "search_config": {
+                "hybrid": request.use_hybrid,
+                "reranker": request.use_reranker,
+                "alpha": request.alpha
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in advanced search: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

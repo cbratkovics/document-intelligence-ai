@@ -9,6 +9,8 @@ from ..core.embeddings import EmbeddingService
 from ..core.chunking import DocumentChunker
 from ..utils.document_loader import DocumentLoader
 from ..core.config import settings
+from .hybrid_search import HybridSearch
+from .reranker import Reranker, SimpleReranker
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,9 @@ class RAGRetriever:
         self.chunker = DocumentChunker()
         self.document_loader = DocumentLoader()
         self._document_cache = {}
+        self.hybrid_search = HybridSearch(self.vector_store)
+        self.reranker = Reranker()
+        self.simple_reranker = SimpleReranker()
     
     async def add_document(
         self,
@@ -66,6 +71,17 @@ class RAGRetriever:
             
             # Add to vector store
             self.vector_store.add_documents(texts, metadatas, chunk_ids)
+            
+            # Add to hybrid search index
+            hybrid_docs = [
+                {
+                    'content': text,
+                    'metadata': metadata,
+                    'chunk_id': chunk_id
+                }
+                for text, metadata, chunk_id in zip(texts, metadatas, chunk_ids)
+            ]
+            self.hybrid_search.add_documents(hybrid_docs)
             
             # Cache document info
             doc_id = document.metadata['doc_id']
@@ -145,19 +161,25 @@ class RAGRetriever:
             logger.error(f"Error searching documents: {e}")
             raise
     
-    async def hybrid_search(
+    async def advanced_search(
         self,
         query: str,
         top_k: int = None,
-        keyword_weight: float = 0.3
+        use_hybrid: bool = True,
+        use_reranker: bool = True,
+        alpha: float = 0.7,
+        filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Perform hybrid search (vector + keyword)
+        Perform advanced search with hybrid search and reranking
         
         Args:
             query: Search query
             top_k: Number of results to return
-            keyword_weight: Weight for keyword search (0-1)
+            use_hybrid: Whether to use hybrid search
+            use_reranker: Whether to use reranking
+            alpha: Weight for vector search in hybrid mode (0-1)
+            filters: Metadata filters
             
         Returns:
             List of search results
@@ -165,36 +187,26 @@ class RAGRetriever:
         try:
             top_k = top_k or settings.search_top_k
             
-            # Vector search
-            vector_results = await self.search(query, top_k * 2)
-            
-            # Simple keyword search in results
-            query_terms = query.lower().split()
-            
-            # Score results based on keyword matches
-            for result in vector_results:
-                content_lower = result['content'].lower()
-                keyword_score = sum(
-                    1 for term in query_terms
-                    if term in content_lower
-                ) / len(query_terms)
-                
-                # Combine scores
-                result['hybrid_score'] = (
-                    (1 - keyword_weight) * result['relevance_score'] +
-                    keyword_weight * keyword_score
+            if use_hybrid:
+                # Use the new hybrid search
+                results = await self.hybrid_search.search(
+                    query=query,
+                    k=top_k * 2 if use_reranker else top_k,
+                    alpha=alpha,
+                    filters=filters
                 )
+            else:
+                # Fall back to standard vector search
+                results = await self.search(query, top_k * 2 if use_reranker else top_k, filters)
             
-            # Sort by hybrid score
-            vector_results.sort(
-                key=lambda x: x['hybrid_score'],
-                reverse=True
-            )
+            if use_reranker and results:
+                # Apply reranking
+                results = await self.reranker.rerank(query, results, top_k)
             
-            return vector_results[:top_k]
+            return results[:top_k]
             
         except Exception as e:
-            logger.error(f"Error in hybrid search: {e}")
+            logger.error(f"Error in advanced search: {e}")
             raise
     
     async def get_context_for_generation(
@@ -213,8 +225,8 @@ class RAGRetriever:
             Tuple of (context_string, source_documents)
         """
         try:
-            # Perform hybrid search
-            results = await self.hybrid_search(query)
+            # Perform advanced search with hybrid and reranking
+            results = await self.advanced_search(query, use_hybrid=True, use_reranker=True)
             
             if not results:
                 return "", []
@@ -298,6 +310,7 @@ class RAGRetriever:
         try:
             self.vector_store.clear_collection()
             self._document_cache.clear()
+            self.hybrid_search.clear()
             logger.info("Cleared all documents")
             return True
         except Exception as e:
