@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from typing import Optional
 import os
@@ -8,6 +8,13 @@ from functools import lru_cache
 class Settings(BaseSettings):
     """Application settings with environment variable support"""
     
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore"  # Allow extra fields for testing
+    )
+    
     # API Configuration
     app_name: str = "Document Intelligence API"
     app_version: str = "0.1.0"
@@ -15,7 +22,7 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     
     # OpenAI Configuration
-    openai_api_key: str = Field(..., env="OPENAI_API_KEY")
+    openai_api_key: str = Field(default="test-key", env="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-3.5-turbo", env="OPENAI_MODEL")
     embedding_model: str = Field(default="text-embedding-ada-002", env="EMBEDDING_MODEL")
     
@@ -42,11 +49,6 @@ class Settings(BaseSettings):
     # Paths
     data_dir: str = Field(default="./data", env="DATA_DIR")
     log_dir: str = Field(default="./logs", env="LOG_DIR")
-    
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
     
     def __init__(self, **values):
         super().__init__(**values)

@@ -2,6 +2,7 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Body
 from fastapi.responses import StreamingResponse
 from typing import List, Optional, Dict, Any
 import logging
+import json
 from pydantic import BaseModel, Field
 
 from ..rag.retriever import RAGRetriever
