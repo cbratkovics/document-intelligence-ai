@@ -60,7 +60,7 @@ generator = RAGGenerator()
 
 @router.post(
     "/documents/upload",
-    response_model=Dict[str, str],
+    response_model=Dict[str, Any],
     tags=["documents"],
     summary="Upload a document",
     responses=response_examples

@@ -70,7 +70,11 @@ class RAGRetriever:
             ]
             
             # Add to vector store
-            self.vector_store.add_documents(texts, metadatas, chunk_ids)
+            self.vector_store.add_documents(
+                documents=texts,
+                metadatas=metadatas,
+                ids=chunk_ids
+            )
             
             # Add to hybrid search index
             hybrid_docs = [

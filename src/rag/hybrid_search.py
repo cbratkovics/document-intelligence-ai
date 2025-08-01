@@ -19,8 +19,17 @@ class HybridSearch:
     
     def add_documents(self, documents: List[Dict[str, Any]]):
         """Add documents to both vector and BM25 indices"""
+        # Extract data for vector store
+        texts = [doc['content'] for doc in documents]
+        metadatas = [doc['metadata'] for doc in documents]
+        ids = [doc['chunk_id'] for doc in documents]
+        
         # Add to vector store
-        self.vector_store.add_documents(documents)
+        self.vector_store.add_documents(
+            documents=texts,
+            metadatas=metadatas,
+            ids=ids
+        )
         
         # Build BM25 index
         self.documents.extend(documents)

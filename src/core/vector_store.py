@@ -1,5 +1,4 @@
 import chromadb
-from chromadb.utils import embedding_functions
 from typing import List, Dict, Any, Optional, Tuple
 import logging
 from datetime import datetime
@@ -47,7 +46,7 @@ class VectorStore:
         """Get or create a collection"""
         try:
             # Custom embedding function that uses our EmbeddingService
-            class CustomEmbeddingFunction(embedding_functions.EmbeddingFunction):
+            class CustomEmbeddingFunction:
                 def __init__(self, embedding_service):
                     self.embedding_service = embedding_service
                 
