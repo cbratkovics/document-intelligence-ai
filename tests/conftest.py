@@ -13,7 +13,8 @@ os.environ['APP_ENV'] = 'testing'
 
 # Create mock OpenAI classes before they're imported
 mock_embeddings_instance = MagicMock()
-mock_embeddings_instance.embed_documents.return_value = [[0.1] * 1536]
+# Make embed_documents return dynamic number of embeddings based on input
+mock_embeddings_instance.embed_documents.side_effect = lambda texts: [[0.1] * 1536 for _ in texts]
 mock_embeddings_instance.embed_query.return_value = [0.1] * 1536
 
 mock_chat_instance = MagicMock()
@@ -30,7 +31,7 @@ sys.modules['langchain_openai'].ChatOpenAI = MagicMock(return_value=mock_chat_in
 def mock_openai():
     """Ensure OpenAI mocks are properly configured"""
     # The mocks are already set at module level, but we can reconfigure if needed
-    mock_embeddings_instance.embed_documents.return_value = [[0.1] * 1536]
+    mock_embeddings_instance.embed_documents.side_effect = lambda texts: [[0.1] * 1536 for _ in texts]
     mock_embeddings_instance.embed_query.return_value = [0.1] * 1536
     mock_chat_instance.ainvoke.return_value.content = "Test response"
     
@@ -87,11 +88,13 @@ def mock_vector_store():
     """Mock vector store for testing"""
     with patch('src.core.vector_store.VectorStore') as mock_store:
         store = mock_store.return_value
-        store.add_documents = AsyncMock(return_value=True)
-        store.search = AsyncMock(return_value=[
+        # Match the actual signature: add_documents(documents: List[str], metadatas: List[Dict[str, Any]], ids: Optional[List[str]] = None)
+        store.add_documents = Mock(side_effect=lambda documents, metadatas, ids=None: None)
+        store.search = Mock(return_value=[
             {
                 "content": "Test content",
-                "relevance_score": 0.9,
+                "similarity": 0.9,
+                "id": "test_id",
                 "metadata": {"doc_id": "test_doc"}
             }
         ])

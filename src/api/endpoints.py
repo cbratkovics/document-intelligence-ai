@@ -113,11 +113,16 @@ async def upload_document(
             metadata=metadata_dict
         )
         
+        # Get document info to include chunks count
+        doc_info = retriever.get_document_info(doc_id)
+        chunks_created = doc_info.get('chunks', 0) if doc_info else 0
+        
         return {
             "document_id": doc_id,
             "filename": file.filename,
             "status": "processed",
-            "message": "Document uploaded and processed successfully"
+            "message": "Document uploaded and processed successfully",
+            "chunks_created": chunks_created
         }
         
     except json.JSONDecodeError:

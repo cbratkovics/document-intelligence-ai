@@ -118,6 +118,8 @@ class TestIntegrationRAG:
             response = await client.post("/api/v1/documents/upload", files=files)
             assert response.status_code == 200
             result = response.json()
+            assert "document_id" in result
+            assert result["status"] == "processed"
             assert result["chunks_created"] > 1  # Should be chunked
     
     @pytest.mark.asyncio
