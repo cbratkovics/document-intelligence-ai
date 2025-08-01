@@ -1,5 +1,4 @@
 import chromadb
-from chromadb.config import Settings as ChromaSettings
 from chromadb.utils import embedding_functions
 from typing import List, Dict, Any, Optional, Tuple
 import logging
@@ -32,8 +31,7 @@ class VectorStore:
                 # For production, connect to ChromaDB server
                 client = chromadb.HttpClient(
                     host=settings.chroma_host,
-                    port=settings.chroma_port,
-                    settings=ChromaSettings(anonymized_telemetry=False)
+                    port=settings.chroma_port
                 )
             
             logger.info(f"Connected to ChromaDB")
