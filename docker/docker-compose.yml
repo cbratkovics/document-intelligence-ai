@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+    depends_on:
+      - redis
+      - chromadb
+    volumes:
+      - ../src:/app/src
+      - ../data:/app/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  chromadb:
+    image: chromadb/chroma:0.4.22
+    ports:
+      - "8001:8000"
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+    volumes:
+      - chroma_data:/chroma/chroma
+
+volumes:
+  redis_data:
+  chroma_data:
