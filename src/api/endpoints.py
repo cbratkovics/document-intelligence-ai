@@ -91,6 +91,8 @@ async def upload_document(
         
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid metadata JSON")
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions to preserve status codes
     except Exception as e:
         logger.error(f"Error uploading document: {e}")
         raise HTTPException(status_code=500, detail=str(e))
