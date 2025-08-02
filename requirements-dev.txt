@@ -1,0 +1,23 @@
+# Development dependencies - Testing and development tools
+# These are only installed in development environments
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+pytest-mock==3.11.1
+
+# Code quality
+black==23.9.1
+isort==5.12.0
+flake8==6.1.0
+mypy==1.6.1
+
+# Development utilities
+ipython==8.16.1
+jupyter==1.0.0
+pre-commit==3.5.0
+
+# Debugging and profiling
+pdb++==0.10.3
+memory-profiler==0.61.0

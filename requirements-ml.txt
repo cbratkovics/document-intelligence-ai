@@ -1,0 +1,10 @@
+# ML dependencies - Heavy model dependencies for local inference
+# These are only installed when local ML models are needed
+
+# Sentence transformers for local embeddings
+sentence-transformers==2.2.2
+
+# Optional: Additional ML libraries for advanced features
+# torch==2.0.1+cpu  # Uncomment for CPU-only PyTorch
+# transformers==4.30.0  # Uncomment for additional transformer models
+# scikit-learn==1.3.0  # Uncomment for additional ML utilities

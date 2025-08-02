@@ -8,6 +8,7 @@ import time
 from typing import Optional
 
 from .endpoints import router
+from .health import router as health_router
 from ..core.config import settings
 from ..monitoring.metrics import (
     request_count, request_latency, active_requests,
@@ -118,6 +119,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(router, prefix="/api/v1")
+app.include_router(health_router)
 
 # Add Prometheus metrics endpoint
 try:
