@@ -85,7 +85,7 @@ jobs:
     
     - name: Test Docker image
       run: |
-        docker run --rm doc-intel:test python -c "import src.api.main; print('Docker image OK')"
+        docker run --rm doc-intel:test python /app/scripts/health_check.py
 
   docker-push:
     name: Push to Docker Hub
