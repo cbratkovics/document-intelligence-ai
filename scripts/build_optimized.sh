@@ -1,258 +1,72 @@
 #!/bin/bash
-# Build script for optimized Docker images
-# This script builds all variants of the optimized Docker images
 
-set -euo pipefail
+# Script to build optimized Docker images
+
+set -e
+
+echo "🔧 Building Optimized Docker Images"
+echo "=================================="
 
 # Colors for output
-RED='\033[0;31m'
 GREEN='\033[0;32m'
+RED='\033[0;31m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Configuration
-IMAGE_NAME="document-intelligence-ai"
-DOCKER_BUILDKIT=1
-BUILD_CONTEXT="../"
-DOCKERFILE="docker/Dockerfile.optimized"
+# Build base runtime
+echo -e "\n${YELLOW}Building base runtime (API-only)...${NC}"
+docker build -f docker/Dockerfile.optimized \
+    --target runtime-base \
+    -t document-intelligence-ai:base \
+    .
 
-# Function to print colored output
-print_color() {
-    local color=$1
-    local message=$2
-    echo -e "${color}${message}${NC}"
-}
+# Build ML runtime without sentence-transformers
+echo -e "\n${YELLOW}Building ML runtime (without sentence-transformers)...${NC}"
+docker build -f docker/Dockerfile.optimized \
+    --target runtime-ml \
+    -t document-intelligence-ai:ml \
+    .
 
-# Function to build image with specified target
-build_image() {
-    local target=$1
-    local tag_suffix=$2
-    local description=$3
-    
-    print_color $BLUE "\n🔨 Building $description..."
-    print_color $BLUE "Target: $target"
-    print_color $BLUE "Tag: ${IMAGE_NAME}:${tag_suffix}"
-    print_color $BLUE "========================================"
-    
-    local start_time=$(date +%s)
-    
-    if DOCKER_BUILDKIT=$DOCKER_BUILDKIT docker build \
-        --target "$target" \
-        --tag "${IMAGE_NAME}:${tag_suffix}" \
-        --file "$DOCKERFILE" \
-        --build-arg BUILDKIT_INLINE_CACHE=1 \
-        "$BUILD_CONTEXT"; then
-        
-        local end_time=$(date +%s)
-        local duration=$((end_time - start_time))
-        
-        print_color $GREEN "✅ Successfully built ${IMAGE_NAME}:${tag_suffix} in ${duration}s"
-        
-        # Show image size
-        local size=$(docker image inspect "${IMAGE_NAME}:${tag_suffix}" --format='{{.Size}}' | numfmt --to=iec)
-        print_color $YELLOW "📏 Image size: $size"
-        
-        return 0
-    else
-        print_color $RED "❌ Failed to build ${IMAGE_NAME}:${tag_suffix}"
-        return 1
-    fi
-}
+# Build development image
+echo -e "\n${YELLOW}Building development image...${NC}"
+docker build -f docker/Dockerfile.optimized \
+    --target development \
+    -t document-intelligence-ai:dev \
+    .
 
-# Function to clean up old images
-cleanup_old_images() {
-    print_color $BLUE "\n🧹 Cleaning up old images..."
-    
-    # Remove dangling images
-    if docker image prune -f > /dev/null 2>&1; then
-        print_color $GREEN "✅ Removed dangling images"
-    fi
-    
-    # Remove old versions of our images (keep only latest)
-    for tag in "optimized" "ml-optimized" "dev-optimized"; do
-        local old_images=$(docker images "${IMAGE_NAME}" --filter "label=stage=${tag}" --format "{{.ID}}" | tail -n +2)
-        if [ -n "$old_images" ]; then
-            echo "$old_images" | xargs docker rmi -f > /dev/null 2>&1 || true
-            print_color $GREEN "✅ Cleaned up old ${tag} images"
-        fi
-    done
-}
+# Display sizes
+echo -e "\n${GREEN}=== Image Sizes ===${NC}"
+docker images | grep -E "document-intelligence|REPOSITORY" | head -10
 
-# Function to verify builds
-verify_builds() {
-    print_color $BLUE "\n🔍 Verifying built images..."
-    
-    local all_success=true
-    local images=("${IMAGE_NAME}:optimized" "${IMAGE_NAME}:ml-optimized" "${IMAGE_NAME}:dev-optimized")
-    
-    for image in "${images[@]}"; do
-        if docker image inspect "$image" >/dev/null 2>&1; then
-            local size=$(docker image inspect "$image" --format='{{.Size}}' | numfmt --to=iec)
-            print_color $GREEN "✅ $image - Size: $size"
-        else
-            print_color $RED "❌ $image - Not found"
-            all_success=false
-        fi
-    done
-    
-    if [ "$all_success" = true ]; then
-        print_color $GREEN "🎉 All images built successfully!"
-    else
-        print_color $RED "❌ Some images failed to build"
-        return 1
-    fi
-}
+# Verify sizes
+echo -e "\n${YELLOW}Verifying image sizes...${NC}"
 
-# Function to show build summary
-show_summary() {
-    print_color $BLUE "\n📊 Build Summary:"
-    print_color $BLUE "=================="
-    
-    printf "%-30s %-15s %-20s\n" "Image" "Size" "Status"
-    printf "%-30s %-15s %-20s\n" "-----" "----" "------"
-    
-    local images=(
-        "${IMAGE_NAME}:optimized|Base Runtime"
-        "${IMAGE_NAME}:ml-optimized|ML Runtime" 
-        "${IMAGE_NAME}:dev-optimized|Dev Runtime"
-    )
-    
-    for image_info in "${images[@]}"; do
-        IFS='|' read -r image description <<< "$image_info"
-        
-        if docker image inspect "$image" >/dev/null 2>&1; then
-            local size=$(docker image inspect "$image" --format='{{.Size}}' | numfmt --to=iec)
-            printf "%-30s %-15s %-20s\n" "$description" "$size" "✅ Built"
-        else
-            printf "%-30s %-15s %-20s\n" "$description" "N/A" "❌ Failed"
-        fi
-    done
-}
+# Check base image
+BASE_SIZE=$(docker inspect document-intelligence-ai:base --format='{{.Size}}' 2>/dev/null || echo 0)
+BASE_SIZE_MB=$((BASE_SIZE / 1048576))
 
-# Main build function
-main() {
-    print_color $GREEN "🐳 Optimized Docker Build Script"
-    print_color $GREEN "================================"
-    
-    # Check for required tools
-    if ! command -v docker &> /dev/null; then
-        print_color $RED "❌ Docker is not installed or not in PATH"
-        exit 1
-    fi
-    
-    # Change to project directory
-    cd "$(dirname "$0")/.."
-    
-    local overall_success=true
-    
-    # Clean up old images first
-    if [ "${CLEANUP:-true}" = "true" ]; then
-        cleanup_old_images
-    fi
-    
-    # Build base runtime image (smallest)
-    if ! build_image "runtime" "optimized" "Base Runtime Image (API-only, no ML models)"; then
-        overall_success=false
-    fi
-    
-    # Build ML runtime image (includes ML dependencies)
-    if ! build_image "ml-runtime" "ml-optimized" "ML Runtime Image (includes sentence-transformers)"; then
-        overall_success=false
-    fi
-    
-    # Build development image (includes dev tools)
-    if ! build_image "dev-runtime" "dev-optimized" "Development Image (includes all dependencies and dev tools)"; then
-        overall_success=false
-    fi
-    
-    # Verify all builds
-    if ! verify_builds; then
-        overall_success=false
-    fi
-    
-    # Show summary
-    show_summary
-    
-    # Final result
-    if [ "$overall_success" = true ]; then
-        print_color $GREEN "\n🎉 All images built successfully!"
-        print_color $YELLOW "\nNext steps:"
-        echo "1. Run size verification: ./scripts/verify_image_size.sh"
-        echo "2. Start services: docker-compose -f docker/docker-compose.optimized.yml up"
-        echo "3. For ML features: docker-compose -f docker/docker-compose.optimized.yml --profile ml up"
-        exit 0
-    else
-        print_color $RED "\n❌ Some builds failed"
-        exit 1
-    fi
-}
-
-# Help function
-show_help() {
-    echo "Optimized Docker Build Script"
-    echo ""
-    echo "Usage: $0 [OPTIONS]"
-    echo ""
-    echo "Options:"
-    echo "  -h, --help      Show this help message"
-    echo "  --no-cleanup    Skip cleanup of old images"
-    echo "  --base-only     Build only the base runtime image"
-    echo "  --ml-only       Build only the ML runtime image"
-    echo "  --dev-only      Build only the development image"
-    echo ""
-    echo "Environment Variables:"
-    echo "  DOCKER_BUILDKIT  Enable Docker BuildKit (default: 1)"
-    echo "  CLEANUP          Clean up old images (default: true)"
-    echo ""
-    echo "Examples:"
-    echo "  $0                    # Build all images"
-    echo "  $0 --base-only        # Build only base image"
-    echo "  CLEANUP=false $0      # Build without cleanup"
-}
-
-# Parse command line arguments
-BASE_ONLY=false
-ML_ONLY=false
-DEV_ONLY=false
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -h|--help)
-            show_help
-            exit 0
-            ;;
-        --no-cleanup)
-            CLEANUP=false
-            shift
-            ;;
-        --base-only)
-            BASE_ONLY=true
-            shift
-            ;;
-        --ml-only)
-            ML_ONLY=true
-            shift
-            ;;
-        --dev-only)
-            DEV_ONLY=true
-            shift
-            ;;
-        *)
-            print_color $RED "Unknown option: $1"
-            show_help
-            exit 1
-            ;;
-    esac
-done
-
-# Conditional building based on flags
-if [ "$BASE_ONLY" = true ]; then
-    build_image "runtime" "optimized" "Base Runtime Image"
-elif [ "$ML_ONLY" = true ]; then
-    build_image "ml-runtime" "ml-optimized" "ML Runtime Image"
-elif [ "$DEV_ONLY" = true ]; then
-    build_image "dev-runtime" "dev-optimized" "Development Image"
+if [ $BASE_SIZE_MB -lt 500 ]; then
+    echo -e "${GREEN}✓ Base image: ${BASE_SIZE_MB}MB (under 500MB)${NC}"
 else
-    main
+    echo -e "${RED}✗ Base image: ${BASE_SIZE_MB}MB (exceeds 500MB)${NC}"
 fi
+
+# Check ML image
+ML_SIZE=$(docker inspect document-intelligence-ai:ml --format='{{.Size}}' 2>/dev/null || echo 0)
+ML_SIZE_MB=$((ML_SIZE / 1048576))
+
+if [ $ML_SIZE_MB -lt 1024 ]; then
+    echo -e "${GREEN}✓ ML image: ${ML_SIZE_MB}MB (under 1GB)${NC}"
+else
+    echo -e "${YELLOW}⚠ ML image: ${ML_SIZE_MB}MB (exceeds 1GB target)${NC}"
+    echo -e "${YELLOW}  Note: sentence-transformers will be downloaded on first use${NC}"
+fi
+
+# Summary
+echo -e "\n${GREEN}=== Build Summary ===${NC}"
+echo "Base runtime: ${BASE_SIZE_MB}MB - API-only mode using OpenAI embeddings"
+echo "ML runtime: ${ML_SIZE_MB}MB - Includes ML dependencies (models downloaded on demand)"
+echo ""
+echo "To use:"
+echo "  Base: docker run -p 8000:8000 document-intelligence-ai:base"
+echo "  ML:   docker run -p 8000:8000 -v ml-models:/app/models document-intelligence-ai:ml"

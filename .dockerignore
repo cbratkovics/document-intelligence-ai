@@ -1,22 +1,12 @@
-# Comprehensive .dockerignore for Document Intelligence AI
-# This file reduces Docker build context size and prevents sensitive files from being copied
-
-# Version control
-.git
-.gitignore
-.gitattributes
-.github/
-
-# Python cache and compiled files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
-build/
-develop-eggs/
+*.egg
+*.egg-info/
 dist/
-downloads/
+build/
 eggs/
 .eggs/
 lib/
@@ -27,123 +17,46 @@ var/
 wheels/
 pip-wheel-metadata/
 share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-.conda/
-anaconda3/
-miniconda3/
-
-# IDE and editor files
-.vscode/
-.vs/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints/
-*.ipynb
-
-# pytest cache
-.pytest_cache/
-.coverage
+*.manifest
+*.spec
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
 htmlcov/
 .tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
 coverage.xml
 *.cover
 *.py,cover
 .hypothesis/
+.pytest_cache/
+pytestdebug.log
 
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+.ENV/
+.env/
 
-# Environment variables and secrets
-.env
-.env.local
-.env.*.local
-*.key
-*.pem
-*.crt
-secrets/
-credentials/
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
 
-# Log files
-*.log
-logs/
-log/
-
-# Data files (usually too large and sensitive)
-data/
-datasets/
-*.csv
-*.tsv
-*.json
-*.parquet
-*.pkl
-*.pickle
-*.h5
-*.hdf5
-*.db
-*.sqlite
-*.sqlite3
-
-# Model files and caches (will be downloaded at runtime)
-models/
-model_cache/
-.cache/
-.transformers_cache/
-.torch/
-.huggingface/
-
-# Temporary files
-tmp/
-temp/
-.tmp/
-*.tmp
-*.temp
-
-# Documentation build
-docs/_build/
-docs/build/
-site/
-
-# Docker files (except the ones we want)
-Dockerfile.old
-docker-compose.override.yml
-docker-compose.local.yml
-
-# CI/CD
-.github/
-.gitlab-ci.yml
-.travis.yml
-circle.yml
-.circleci/
-
-# Package manager files
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-package-lock.json
-yarn.lock
-
-# OS generated files
+# OS
 .DS_Store
 .DS_Store?
 ._*
@@ -152,48 +65,93 @@ yarn.lock
 ehthumbs.db
 Thumbs.db
 
-# Backup files
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+docs/
+*.md
+README*
+LICENSE*
+CHANGELOG*
+
+# Testing
+tests/
+test/
+testing/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+azure-pipelines.yml
+Jenkinsfile
+
+# Docker
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
 *.bak
-*.backup
-*.old
-*.orig
+*.swp
+*.swo
+*~
 
-# Archive files
-*.tar
-*.tar.gz
-*.tar.bz2
-*.tar.xz
-*.zip
-*.rar
-*.7z
+# Data files (exclude from image)
+*.csv
+*.xlsx
+*.xls
+*.db
+*.sqlite
+*.sqlite3
+data/
+datasets/
 
-# Large media files
-*.mp4
-*.avi
-*.mov
-*.mkv
-*.pdf
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.svg
-*.ico
+# Model files (will be downloaded on demand)
+*.bin
+*.pt
+*.pth
+*.pkl
+*.h5
+*.safetensors
+models/
+model_cache/
 
-# Miscellaneous
-*.pid
-.sass-cache/
-.npm/
-.yarn-integrity
-.pnp.*
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
 
-# Keep important files
-!requirements*.txt
-!docker/
-!src/
-!scripts/
-!tests/
-!pyproject.toml
-!README.md
-!LICENSE
-!Makefile
+# Node (if any frontend assets)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# MacOS
+.AppleDouble
+.LSOverride
+Icon
+.DocumentRevisions-V100
+.fseventsd
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk

@@ -1,10 +1,16 @@
-# ML dependencies - Heavy model dependencies for local inference
-# These are only installed when local ML models are needed
+# Heavy ML dependencies (installed separately)
+-r requirements-base.txt
 
-# Sentence transformers for local embeddings
+# LangChain ecosystem
+langchain==0.2.16
+langchain-community==0.2.16
+langchain-openai==0.1.25
+chromadb==0.4.22
+
+# Data processing
+pandas==2.0.3
+celery==5.3.4
+
+# Advanced RAG dependencies
+rank-bm25==0.2.2
 sentence-transformers==2.2.2
-
-# Optional: Additional ML libraries for advanced features
-# torch==2.0.1+cpu  # Uncomment for CPU-only PyTorch
-# transformers==4.30.0  # Uncomment for additional transformer models
-# scikit-learn==1.3.0  # Uncomment for additional ML utilities

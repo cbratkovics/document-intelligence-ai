@@ -1,246 +1,195 @@
 #!/usr/bin/env python3
 """
-Model initialization script for lazy-loading ML models.
-
-This script downloads and initializes ML models on first use rather than
-baking them into the Docker image, significantly reducing image size.
+Model initialization script for lazy loading of ML models.
+Downloads and caches models on first use to reduce Docker image size.
 """
 
 import os
 import sys
-import logging
-import asyncio
-import time
-from pathlib import Path
-from typing import Optional, Dict, Any
 import json
+import logging
+from pathlib import Path
+from typing import Dict, List, Any
+import time
 
-# Add src to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+# Add src to path
+sys.path.append('/app')
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Model configurations
+MODEL_CACHE_DIR = Path(os.getenv('MODEL_CACHE_DIR', '/app/models'))
+STATUS_FILE = MODEL_CACHE_DIR / 'init_status.json'
+
+# Models to download
 MODELS_CONFIG = {
-    "sentence_transformer": {
-        "name": "all-MiniLM-L6-v2",
-        "size_mb": 90,
-        "required": False,  # Only load if sentence-transformers is available
-        "description": "Lightweight sentence embedding model"
-    },
-    "reranker": {
-        "name": "cross-encoder/ms-marco-MiniLM-L-6-v2", 
-        "size_mb": 90,
-        "required": False,
-        "description": "Cross-encoder reranking model"
+    'sentence-transformers': {
+        'models': [
+            'sentence-transformers/all-MiniLM-L6-v2',  # Small, fast model
+            # Add more models as needed
+        ],
+        'optional': True,
+        'description': 'Sentence transformer models for embeddings'
     }
 }
 
-class ModelInitializer:
-    """Handles lazy initialization of ML models"""
+def ensure_directories():
+    """Ensure model directories exist"""
+    MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Model cache directory: {MODEL_CACHE_DIR}")
+
+def load_status() -> Dict[str, Any]:
+    """Load initialization status"""
+    if STATUS_FILE.exists():
+        with open(STATUS_FILE, 'r') as f:
+            return json.load(f)
+    return {
+        'initialized': False,
+        'timestamp': None,
+        'models': {},
+        'errors': []
+    }
+
+def save_status(status: Dict[str, Any]):
+    """Save initialization status"""
+    with open(STATUS_FILE, 'w') as f:
+        json.dump(status, f, indent=2)
+
+def download_sentence_transformer_models(model_names: List[str]) -> Dict[str, Any]:
+    """Download sentence transformer models"""
+    results = {}
     
-    def __init__(self, models_dir: str = None):
-        self.models_dir = Path(models_dir or os.getenv('MODEL_CACHE_DIR', '/app/models'))
-        self.models_dir.mkdir(parents=True, exist_ok=True)
-        self.status_file = self.models_dir / 'init_status.json'
+    try:
+        from sentence_transformers import SentenceTransformer
         
-    def get_initialization_status(self) -> Dict[str, Any]:
-        """Get the current model initialization status"""
-        if self.status_file.exists():
+        for model_name in model_names:
             try:
-                with open(self.status_file, 'r') as f:
-                    return json.load(f)
+                logger.info(f"Downloading model: {model_name}")
+                start_time = time.time()
+                
+                # Download and cache the model
+                model = SentenceTransformer(model_name, cache_folder=str(MODEL_CACHE_DIR))
+                
+                # Test the model
+                test_embedding = model.encode("Test sentence")
+                
+                download_time = time.time() - start_time
+                results[model_name] = {
+                    'status': 'success',
+                    'download_time': round(download_time, 2),
+                    'embedding_dim': len(test_embedding)
+                }
+                logger.info(f"✓ Model {model_name} downloaded successfully ({download_time:.2f}s)")
+                
             except Exception as e:
-                logger.warning(f"Could not read status file: {e}")
-        
-        return {
-            "initialized": False,
-            "models": {},
-            "last_update": None,
-            "errors": []
-        }
-    
-    def save_initialization_status(self, status: Dict[str, Any]):
-        """Save model initialization status"""
-        try:
-            status["last_update"] = time.time()
-            with open(self.status_file, 'w') as f:
-                json.dump(status, f, indent=2)
-        except Exception as e:
-            logger.error(f"Could not save status file: {e}")
-    
-    def check_dependencies(self) -> Dict[str, bool]:
-        """Check which ML dependencies are available"""
-        dependencies = {}
-        
-        try:
-            import sentence_transformers
-            dependencies['sentence_transformers'] = True
-            logger.info("sentence-transformers is available")
-        except ImportError:
-            dependencies['sentence_transformers'] = False
-            logger.info("sentence-transformers not available - using OpenAI embeddings only")
-        
-        return dependencies
-    
-    async def initialize_sentence_transformer(self, model_name: str) -> bool:
-        """Initialize sentence transformer model"""
-        try:
-            from sentence_transformers import SentenceTransformer
-            
-            logger.info(f"Initializing SentenceTransformer: {model_name}")
-            
-            # Download and cache the model
-            model = SentenceTransformer(model_name, cache_folder=str(self.models_dir))
-            
-            # Test the model with a simple embedding
-            test_embedding = model.encode("test sentence")
-            logger.info(f"Model {model_name} initialized successfully. Embedding dimension: {len(test_embedding)}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize {model_name}: {e}")
-            return False
-    
-    async def initialize_reranker_model(self, model_name: str) -> bool:
-        """Initialize cross-encoder reranking model"""
-        try:
-            from sentence_transformers import CrossEncoder
-            
-            logger.info(f"Initializing CrossEncoder: {model_name}")
-            
-            # Download and cache the model
-            model = CrossEncoder(model_name, cache_folder=str(self.models_dir))
-            
-            # Test the model
-            test_score = model.predict([("test query", "test document")])
-            logger.info(f"Reranker model {model_name} initialized successfully. Test score: {test_score}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize reranker {model_name}: {e}")
-            return False
-    
-    async def initialize_models(self, force: bool = False) -> Dict[str, Any]:
-        """Initialize all available models"""
-        status = self.get_initialization_status()
-        
-        if status.get("initialized", False) and not force:
-            logger.info("Models already initialized. Use --force to reinitialize.")
-            return status
-        
-        logger.info("Starting model initialization...")
-        
-        # Check dependencies
-        dependencies = self.check_dependencies()
-        
-        # Initialize models based on available dependencies
-        errors = []
-        models_status = {}
-        
-        if dependencies.get('sentence_transformers', False):
-            # Initialize sentence transformer
-            st_config = MODELS_CONFIG["sentence_transformer"]
-            success = await self.initialize_sentence_transformer(st_config["name"])
-            models_status["sentence_transformer"] = {
-                "initialized": success,
-                "model_name": st_config["name"],
-                "size_mb": st_config["size_mb"] if success else 0
+                logger.error(f"✗ Failed to download {model_name}: {e}")
+                results[model_name] = {
+                    'status': 'failed',
+                    'error': str(e)
+                }
+                
+    except ImportError:
+        logger.warning("sentence-transformers not installed. Skipping model downloads.")
+        for model_name in model_names:
+            results[model_name] = {
+                'status': 'skipped',
+                'reason': 'sentence-transformers not installed'
             }
-            if not success:
-                errors.append(f"Failed to initialize sentence transformer: {st_config['name']}")
-            
-            # Initialize reranker
-            reranker_config = MODELS_CONFIG["reranker"]
-            success = await self.initialize_reranker_model(reranker_config["name"])
-            models_status["reranker"] = {
-                "initialized": success,
-                "model_name": reranker_config["name"],
-                "size_mb": reranker_config["size_mb"] if success else 0
-            }
-            if not success:
-                errors.append(f"Failed to initialize reranker: {reranker_config['name']}")
-        else:
-            logger.info("No local ML models will be initialized - using API-based models only")
-            models_status["api_only"] = {
-                "initialized": True,
-                "model_name": "OpenAI API",
-                "size_mb": 0
-            }
-        
-        # Update status
-        status.update({
-            "initialized": True,
-            "models": models_status,
-            "errors": errors,
-            "dependencies": dependencies
-        })
-        
-        self.save_initialization_status(status)
-        
-        # Log summary
-        total_size = sum(model.get("size_mb", 0) for model in models_status.values())
-        initialized_count = sum(1 for model in models_status.values() if model.get("initialized", False))
-        
-        logger.info(f"Model initialization complete:")
-        logger.info(f"  - {initialized_count} models initialized")
-        logger.info(f"  - Total model size: ~{total_size}MB")
-        logger.info(f"  - Errors: {len(errors)}")
-        
-        if errors:
-            for error in errors:
-                logger.warning(f"  - {error}")
-        
+    
+    return results
+
+def initialize_models(force: bool = False) -> Dict[str, Any]:
+    """Initialize all models"""
+    ensure_directories()
+    status = load_status()
+    
+    if status['initialized'] and not force:
+        logger.info("Models already initialized. Use --force to re-initialize.")
         return status
     
-    def get_model_info(self) -> Dict[str, Any]:
-        """Get information about available models"""
-        status = self.get_initialization_status()
-        dependencies = self.check_dependencies()
+    logger.info("Starting model initialization...")
+    start_time = time.time()
+    
+    status['timestamp'] = time.time()
+    status['errors'] = []
+    
+    # Download sentence transformer models
+    if 'sentence-transformers' in MODELS_CONFIG:
+        config = MODELS_CONFIG['sentence-transformers']
+        results = download_sentence_transformer_models(config['models'])
+        status['models']['sentence-transformers'] = results
         
-        return {
-            "status": status,
-            "dependencies": dependencies,
-            "models_config": MODELS_CONFIG,
-            "models_dir": str(self.models_dir)
-        }
+        # Check for errors
+        for model_name, result in results.items():
+            if result['status'] == 'failed':
+                status['errors'].append({
+                    'model': model_name,
+                    'error': result.get('error', 'Unknown error')
+                })
+    
+    # Mark as initialized
+    status['initialized'] = True
+    status['init_time'] = round(time.time() - start_time, 2)
+    
+    # Save status
+    save_status(status)
+    
+    # Summary
+    total_models = sum(len(config['models']) for config in MODELS_CONFIG.values())
+    successful = sum(
+        1 for models in status['models'].values() 
+        for result in models.values() 
+        if result['status'] == 'success'
+    )
+    
+    logger.info(f"\nInitialization complete!")
+    logger.info(f"Total models: {total_models}")
+    logger.info(f"Successful: {successful}")
+    logger.info(f"Failed: {len(status['errors'])}")
+    logger.info(f"Time taken: {status['init_time']}s")
+    
+    return status
 
+def check_models() -> bool:
+    """Check if models are initialized"""
+    status = load_status()
+    if not status['initialized']:
+        logger.warning("Models not initialized. Run with --init to initialize.")
+        return False
+    
+    logger.info("Model status:")
+    for category, models in status['models'].items():
+        logger.info(f"\n{category}:")
+        for model_name, result in models.items():
+            if result['status'] == 'success':
+                logger.info(f"  ✓ {model_name}")
+            else:
+                logger.info(f"  ✗ {model_name} ({result['status']})")
+    
+    return len(status['errors']) == 0
 
-async def main():
-    """Main initialization function"""
+def main():
+    """Main entry point"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Initialize ML models for Document Intelligence AI")
-    parser.add_argument("--force", action="store_true", help="Force reinitialization of models")
-    parser.add_argument("--info", action="store_true", help="Show model information and exit")
-    parser.add_argument("--models-dir", help="Custom models directory")
+    parser = argparse.ArgumentParser(description='Initialize ML models')
+    parser.add_argument('--force', action='store_true', help='Force re-initialization')
+    parser.add_argument('--check', action='store_true', help='Check model status')
+    parser.add_argument('--init', action='store_true', help='Initialize models')
     
     args = parser.parse_args()
     
-    initializer = ModelInitializer(args.models_dir)
-    
-    if args.info:
-        info = initializer.get_model_info()
-        print(json.dumps(info, indent=2))
-        return
-    
-    try:
-        status = await initializer.initialize_models(force=args.force)
-        
-        if status.get("errors"):
-            logger.warning("Some models failed to initialize, but the application can still run with API-based models")
-            sys.exit(1 if len(status["errors"]) == len(MODELS_CONFIG) else 0)
+    if args.check:
+        check_models()
+    elif args.init or args.force:
+        initialize_models(force=args.force)
+    else:
+        # Default action: initialize if not already done
+        status = load_status()
+        if not status['initialized']:
+            initialize_models()
         else:
-            logger.info("All available models initialized successfully")
-            sys.exit(0)
-            
-    except Exception as e:
-        logger.error(f"Model initialization failed: {e}")
-        sys.exit(1)
+            check_models()
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    main()

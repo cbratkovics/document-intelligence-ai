@@ -1,15 +1,13 @@
 version: '3.8'
 
 services:
-  # Main application service with optimized image
-  app:
+  # Base API service (without ML models)
+  app-base:
     build:
       context: ..
       dockerfile: docker/Dockerfile.optimized
-      target: runtime  # Use base runtime by default (no ML models baked in)
-      args:
-        - BUILDKIT_INLINE_CACHE=1
-    image: document-intelligence-ai:optimized
+      target: runtime-base
+    image: document-intelligence-ai:base
     ports:
       - "8000:8000"
     environment:
@@ -18,44 +16,30 @@ services:
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
       - MODEL_CACHE_DIR=/app/models
-      - HF_HOME=/app/models
-      - TRANSFORMERS_CACHE=/app/models
+      - USE_LOCAL_EMBEDDINGS=false
     depends_on:
       - redis
       - chromadb
     volumes:
-      # Application data
-      - ../data:/app/data:rw
-      - ../logs:/app/logs:rw
-      # Model cache (persistent to avoid re-downloading)
-      - model_cache:/app/models:rw
-      # Source code for development (commented out for production)
-      # - ../src:/app/src:ro
-    restart: unless-stopped
+      - ../src:/app/src
+      - ../data:/app/data
+      - app-logs:/app/logs
+      - ml-models:/app/models
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: '1.0'
-        reservations:
-          memory: 512M
-          cpus: '0.5'
+    profiles:
+      - base
 
-  # ML-enabled service (alternative to app service)
+  # ML-enabled API service
   app-ml:
     build:
       context: ..
       dockerfile: docker/Dockerfile.optimized
-      target: ml-runtime  # Include ML dependencies
-      args:
-        - BUILDKIT_INLINE_CACHE=1
-    image: document-intelligence-ai:ml-optimized
+      target: runtime-ml
+    image: document-intelligence-ai:ml
     ports:
       - "8000:8000"
     environment:
@@ -64,88 +48,79 @@ services:
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
       - MODEL_CACHE_DIR=/app/models
-      - HF_HOME=/app/models
-      - TRANSFORMERS_CACHE=/app/models
-      - USE_LOCAL_MODELS=true
+      - USE_LOCAL_EMBEDDINGS=true
     depends_on:
       - redis
       - chromadb
     volumes:
-      - ../data:/app/data:rw
-      - ../logs:/app/logs:rw
-      - model_cache:/app/models:rw
-    restart: unless-stopped
+      - ../src:/app/src
+      - ../data:/app/data
+      - app-logs:/app/logs
+      - ml-models:/app/models
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s  # Longer start period for model initialization
-    deploy:
-      resources:
-        limits:
-          memory: 2G
-          cpus: '2.0'
-        reservations:
-          memory: 1G
-          cpus: '1.0'
     profiles:
-      - ml  # Only start with --profile ml
+      - ml
+      - default
 
   # Development service
   app-dev:
     build:
       context: ..
       dockerfile: docker/Dockerfile.optimized
-      target: dev-runtime
-      args:
-        - BUILDKIT_INLINE_CACHE=1
-    image: document-intelligence-ai:dev-optimized
+      target: development
+    image: document-intelligence-ai:dev
     ports:
       - "8000:8000"
-      - "8888:8888"  # Jupyter notebook
+      - "8888:8888"  # Jupyter
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - REDIS_URL=redis://redis:6379
       - CHROMA_HOST=chromadb
       - CHROMA_PORT=8000
       - MODEL_CACHE_DIR=/app/models
-      - HF_HOME=/app/models
-      - TRANSFORMERS_CACHE=/app/models
-      - PYTHONPATH=/app
-      - DEVELOPMENT=true
+      - USE_LOCAL_EMBEDDINGS=true
     depends_on:
       - redis
       - chromadb
     volumes:
-      # Source code mounted for development
-      - ../src:/app/src:rw
-      - ../tests:/app/tests:rw
-      - ../scripts:/app/scripts:rw
-      - ../data:/app/data:rw
-      - ../logs:/app/logs:rw
-      - model_cache:/app/models:rw
-    restart: unless-stopped
+      - ../src:/app/src
+      - ../tests:/app/tests
+      - ../data:/app/data
+      - app-logs:/app/logs
+      - ml-models:/app/models
     profiles:
-      - dev  # Only start with --profile dev
+      - dev
+
+  # Model initialization service
+  model-init:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.optimized
+      target: runtime-ml
+    image: document-intelligence-ai:ml
+    command: python /app/scripts/init_models.py --init
+    environment:
+      - MODEL_CACHE_DIR=/app/models
+    volumes:
+      - ml-models:/app/models
+    profiles:
+      - init
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.5'
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
 
   chromadb:
     image: chromadb/chroma:0.4.22
@@ -154,43 +129,26 @@ services:
     environment:
       - IS_PERSISTENT=TRUE
       - PERSIST_DIRECTORY=/chroma/chroma
-      - ANONYMIZED_TELEMETRY=FALSE
     volumes:
-      - chroma_data:/chroma/chroma
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
+      - chroma-data:/chroma/chroma
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   prometheus:
     image: prom/prometheus:latest
     ports:
       - "9090:9090"
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-      - '--storage.tsdb.retention.time=200h'
-      - '--web.enable-lifecycle'
     depends_on:
-      - app
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: '0.5'
+      - app-ml
     profiles:
       - monitoring
 
@@ -202,36 +160,22 @@ services:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_INSTALL_PLUGINS=grafana-piechart-panel
     volumes:
-      - grafana_data:/var/lib/grafana
+      - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: '0.5'
     profiles:
       - monitoring
 
 volumes:
-  redis_data:
-    driver: local
-  chroma_data:
-    driver: local
-  prometheus_data:
-    driver: local
-  grafana_data:
-    driver: local
-  model_cache:
+  redis-data:
+  chroma-data:
+  prometheus-data:
+  grafana-data:
+  app-logs:
+  ml-models:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: ${MODEL_CACHE_HOST_PATH:-./models}
-
-networks:
-  default:
-    driver: bridge
+      device: ${PWD}/../models
