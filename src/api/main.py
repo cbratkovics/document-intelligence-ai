@@ -11,14 +11,17 @@ from .endpoints import router
 from .health import router as health_router
 from ..core.config import settings
 from ..monitoring.metrics import (
-    request_count, request_latency, active_requests,
-    initialize_metrics, system_info
+    request_count,
+    request_latency,
+    active_requests,
+    initialize_metrics,
+    system_info,
 )
 
 # Configure logging
 logging.basicConfig(
     level=getattr(logging, settings.log_level),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
 logger = logging.getLogger(__name__)
@@ -29,19 +32,16 @@ async def lifespan(app: FastAPI):
     """Handle startup and shutdown events"""
     # Startup
     logger.info("Starting Document Intelligence API...")
-    
+
     # Create necessary directories
     os.makedirs(settings.data_dir, exist_ok=True)
     os.makedirs(settings.log_dir, exist_ok=True)
-    
+
     # Initialize metrics
-    initialize_metrics(
-        app_version=settings.app_version,
-        environment=settings.app_env
-    )
-    
+    initialize_metrics(app_version=settings.app_version, environment=settings.app_env)
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down Document Intelligence API...")
 
@@ -87,25 +87,16 @@ For more information, see the [GitHub repository](https://github.com/cbratkovics
     openapi_tags=[
         {
             "name": "documents",
-            "description": "Document upload, management, and deletion operations"
+            "description": "Document upload, management, and deletion operations",
         },
         {
             "name": "search",
-            "description": "Search operations including vector, hybrid, and advanced search"
+            "description": "Search operations including vector, hybrid, and advanced search",
         },
-        {
-            "name": "query",
-            "description": "RAG-based question answering and generation"
-        },
-        {
-            "name": "health",
-            "description": "Health checks and system status"
-        },
-        {
-            "name": "metrics",
-            "description": "Prometheus metrics and monitoring"
-        }
-    ]
+        {"name": "query", "description": "RAG-based question answering and generation"},
+        {"name": "health", "description": "Health checks and system status"},
+        {"name": "metrics", "description": "Prometheus metrics and monitoring"},
+    ],
 )
 
 # Configure CORS
@@ -124,6 +115,7 @@ app.include_router(health_router)
 # Add Prometheus metrics endpoint
 try:
     from prometheus_client import make_asgi_app
+
     metrics_app = make_asgi_app()
     app.mount("/metrics", metrics_app)
 except ImportError:
@@ -136,7 +128,7 @@ async def track_requests(request: Request, call_next):
     """Middleware to track all HTTP requests"""
     start_time = time.time()
     active_requests.inc()
-    
+
     try:
         response = await call_next(request)
         status = "success" if response.status_code < 400 else "error"
@@ -145,22 +137,19 @@ async def track_requests(request: Request, call_next):
         raise
     finally:
         duration = time.time() - start_time
-        
+
         # Only track API endpoints
         if request.url.path.startswith("/api/"):
             request_count.labels(
-                method=request.method,
-                endpoint=request.url.path,
-                status=status
+                method=request.method, endpoint=request.url.path, status=status
             ).inc()
-            
+
             request_latency.labels(
-                method=request.method,
-                endpoint=request.url.path
+                method=request.method, endpoint=request.url.path
             ).observe(duration)
-        
+
         active_requests.dec()
-    
+
     return response
 
 
@@ -172,7 +161,7 @@ async def root():
         "version": settings.app_version,
         "status": "operational",
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
     }
 
 
@@ -180,14 +169,14 @@ async def root():
 async def health_check():
     """
     Health check endpoint.
-    
+
     Returns the current health status of the API and its dependencies.
     """
     try:
         # Check if we can import all necessary modules
         from ..rag.retriever import RAGRetriever
         from ..rag.generator import RAGGenerator
-        
+
         return {
             "status": "healthy",
             "version": settings.app_version,
@@ -195,17 +184,13 @@ async def health_check():
             "services": {
                 "api": "operational",
                 "embeddings": "operational",
-                "vector_store": "operational"
-            }
+                "vector_store": "operational",
+            },
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         return JSONResponse(
-            status_code=503,
-            content={
-                "status": "unhealthy",
-                "error": str(e)
-            }
+            status_code=503, content={"status": "unhealthy", "error": str(e)}
         )
 
 
@@ -217,8 +202,8 @@ async def global_exception_handler(request, exc):
         status_code=500,
         content={
             "error": "Internal server error",
-            "message": str(exc) if settings.is_development else "An error occurred"
-        }
+            "message": str(exc) if settings.is_development else "An error occurred",
+        },
     )
 
 
@@ -226,53 +211,52 @@ async def global_exception_handler(request, exc):
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
-    
+
     from fastapi.openapi.utils import get_openapi
-    
+
     openapi_schema = get_openapi(
         title=app.title,
         version=app.version,
         description=app.description,
         routes=app.routes,
-        tags=app.openapi_tags
+        tags=app.openapi_tags,
     )
-    
+
     # Add security scheme
     openapi_schema["components"]["securitySchemes"] = {
         "ApiKeyAuth": {
             "type": "apiKey",
             "in": "header",
             "name": "X-API-Key",
-            "description": "API key for authentication"
+            "description": "API key for authentication",
         }
     }
-    
+
     # Add servers
     openapi_schema["servers"] = [
-        {
-            "url": "http://localhost:8000",
-            "description": "Local development server"
-        },
+        {"url": "http://localhost:8000", "description": "Local development server"},
         {
             "url": "https://api.document-intelligence.com",
-            "description": "Production server"
-        }
+            "description": "Production server",
+        },
     ]
-    
+
     # Add external docs
     openapi_schema["externalDocs"] = {
         "description": "GitHub Repository",
-        "url": "https://github.com/cbratkovics/document-intelligence-ai"
+        "url": "https://github.com/cbratkovics/document-intelligence-ai",
     }
-    
+
     app.openapi_schema = openapi_schema
     return app.openapi_schema
+
 
 app.openapi = custom_openapi
 
 
 # Development-only endpoints
 if settings.is_development:
+
     @app.get("/debug/config")
     async def debug_config():
         """Show current configuration (development only)"""
@@ -283,5 +267,5 @@ if settings.is_development:
             "chunk_size": settings.chunk_size,
             "chunk_overlap": settings.chunk_overlap,
             "search_top_k": settings.search_top_k,
-            "similarity_threshold": settings.similarity_threshold
+            "similarity_threshold": settings.similarity_threshold,
         }

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class RAGRetriever:
     """RAG retriever for document search and retrieval"""
-    
+
     def __init__(self):
         self.vector_store = VectorStore()
         self.embedding_service = EmbeddingService()
@@ -27,144 +27,131 @@ class RAGRetriever:
         self.hybrid_search = HybridSearch(self.vector_store)
         self.reranker = Reranker()
         self.simple_reranker = SimpleReranker()
-    
+
     async def add_document(
-        self,
-        filename: str,
-        content: bytes,
-        metadata: Optional[Dict[str, Any]] = None
+        self, filename: str, content: bytes, metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Add a document to the RAG system
-        
+
         Args:
             filename: Document filename
             content: Document content as bytes
             metadata: Additional metadata
-            
+
         Returns:
             Document ID
         """
         try:
             # Save uploaded file
             file_path = self.document_loader.save_uploaded_file(filename, content)
-            
+
             # Load document
             document = self.document_loader.load_document(file_path, content)
-            
+
             # Add custom metadata
             if metadata:
                 document.metadata.update(metadata)
-            
+
             # Chunk document
             chunks = self.chunker.smart_chunk_document(document)
-            
+
             # Prepare for vector store
             texts = [chunk.page_content for chunk in chunks]
             metadatas = [chunk.metadata for chunk in chunks]
-            
+
             # Generate unique IDs for chunks
             chunk_ids = [
-                f"{document.metadata['doc_id']}_{i}"
-                for i in range(len(chunks))
+                f"{document.metadata['doc_id']}_{i}" for i in range(len(chunks))
             ]
-            
+
             # Add to vector store
             self.vector_store.add_documents(
-                documents=texts,
-                metadatas=metadatas,
-                ids=chunk_ids
+                documents=texts, metadatas=metadatas, ids=chunk_ids
             )
-            
+
             # Add to hybrid search index
             hybrid_docs = [
-                {
-                    'content': text,
-                    'metadata': metadata,
-                    'chunk_id': chunk_id
-                }
+                {"content": text, "metadata": metadata, "chunk_id": chunk_id}
                 for text, metadata, chunk_id in zip(texts, metadatas, chunk_ids)
             ]
             self.hybrid_search.add_documents(hybrid_docs)
-            
+
             # Cache document info
-            doc_id = document.metadata['doc_id']
+            doc_id = document.metadata["doc_id"]
             self._document_cache[doc_id] = {
-                'filename': filename,
-                'chunks': len(chunks),
-                'added_at': datetime.utcnow().isoformat()
+                "filename": filename,
+                "chunks": len(chunks),
+                "added_at": datetime.utcnow().isoformat(),
             }
-            
-            logger.info(
-                f"Added document '{filename}' with {len(chunks)} chunks"
-            )
-            
+
+            logger.info(f"Added document '{filename}' with {len(chunks)} chunks")
+
             return doc_id
-            
+
         except Exception as e:
             logger.error(f"Error adding document: {e}")
             raise
-    
+
     async def search(
         self,
         query: str,
         top_k: int = None,
         filters: Optional[Dict[str, Any]] = None,
-        include_metadata: bool = True
+        include_metadata: bool = True,
     ) -> List[Dict[str, Any]]:
         """
         Search for relevant documents
-        
+
         Args:
             query: Search query
             top_k: Number of results to return
             filters: Metadata filters
             include_metadata: Whether to include metadata in results
-            
+
         Returns:
             List of search results
         """
         try:
             top_k = top_k or settings.search_top_k
-            
+
             # Search vector store
             results = self.vector_store.search(
-                query=query,
-                n_results=top_k,
-                filter=filters
+                query=query, n_results=top_k, filter=filters
             )
-            
+
             # Format results
             formatted_results = []
             for result in results:
                 formatted = {
-                    'content': result['content'],
-                    'relevance_score': result['similarity'],
-                    'chunk_id': result['id']
+                    "content": result["content"],
+                    "relevance_score": result["similarity"],
+                    "chunk_id": result["id"],
                 }
-                
+
                 if include_metadata:
-                    formatted['metadata'] = result['metadata']
-                
+                    formatted["metadata"] = result["metadata"]
+
                 formatted_results.append(formatted)
-            
+
             # Filter by similarity threshold
             formatted_results = [
-                r for r in formatted_results
-                if r['relevance_score'] >= settings.similarity_threshold
+                r
+                for r in formatted_results
+                if r["relevance_score"] >= settings.similarity_threshold
             ]
-            
+
             logger.info(
                 f"Search for '{query[:50]}...' returned "
                 f"{len(formatted_results)} results"
             )
-            
+
             return formatted_results
-            
+
         except Exception as e:
             logger.error(f"Error searching documents: {e}")
             raise
-    
+
     async def advanced_search(
         self,
         query: str,
@@ -172,11 +159,11 @@ class RAGRetriever:
         use_hybrid: bool = True,
         use_reranker: bool = True,
         alpha: float = 0.7,
-        filters: Optional[Dict[str, Any]] = None
+        filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Perform advanced search with hybrid search and reranking
-        
+
         Args:
             query: Search query
             top_k: Number of results to return
@@ -184,88 +171,90 @@ class RAGRetriever:
             use_reranker: Whether to use reranking
             alpha: Weight for vector search in hybrid mode (0-1)
             filters: Metadata filters
-            
+
         Returns:
             List of search results
         """
         try:
             top_k = top_k or settings.search_top_k
-            
+
             if use_hybrid:
                 # Use the new hybrid search
                 results = await self.hybrid_search.search(
                     query=query,
                     k=top_k * 2 if use_reranker else top_k,
                     alpha=alpha,
-                    filters=filters
+                    filters=filters,
                 )
             else:
                 # Fall back to standard vector search
-                results = await self.search(query, top_k * 2 if use_reranker else top_k, filters)
-            
+                results = await self.search(
+                    query, top_k * 2 if use_reranker else top_k, filters
+                )
+
             if use_reranker and results:
                 # Apply reranking
                 results = await self.reranker.rerank(query, results, top_k)
-            
+
             return results[:top_k]
-            
+
         except Exception as e:
             logger.error(f"Error in advanced search: {e}")
             raise
-    
+
     async def get_context_for_generation(
-        self,
-        query: str,
-        max_context_length: int = 3000
+        self, query: str, max_context_length: int = 3000
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """
         Get context for answer generation
-        
+
         Args:
             query: User query
             max_context_length: Maximum context length in characters
-            
+
         Returns:
             Tuple of (context_string, source_documents)
         """
         try:
             # Perform advanced search with hybrid and reranking
-            results = await self.advanced_search(query, use_hybrid=True, use_reranker=True)
-            
+            results = await self.advanced_search(
+                query, use_hybrid=True, use_reranker=True
+            )
+
             if not results:
                 return "", []
-            
+
             # Build context string
             context_parts = []
             total_length = 0
             used_results = []
-            
+
             for result in results:
-                chunk_text = result['content']
+                chunk_text = result["content"]
                 chunk_length = len(chunk_text)
-                
+
                 if total_length + chunk_length > max_context_length:
                     break
-                
+
                 context_parts.append(chunk_text)
                 total_length += chunk_length
                 used_results.append(result)
-            
+
             context = "\n\n---\n\n".join(context_parts)
-            
+
             return context, used_results
-            
+
         except Exception as e:
             logger.error(f"Error getting context: {e}")
             raise
-    
+
     def delete_document(self, doc_id: str) -> bool:
         """
         Delete a document and all its chunks
-        
+
         Args:
             doc_id: Document ID
-            
+
         Returns:
             Success status
         """
@@ -278,37 +267,34 @@ class RAGRetriever:
                     chunk_ids.append(chunk_id)
                 else:
                     break
-            
+
             if chunk_ids:
                 self.vector_store.delete_documents(chunk_ids)
-                
+
                 # Remove from cache
                 if doc_id in self._document_cache:
                     del self._document_cache[doc_id]
-                
+
                 logger.info(f"Deleted document {doc_id} with {len(chunk_ids)} chunks")
                 return True
-            
+
             return False
-            
+
         except Exception as e:
             logger.error(f"Error deleting document: {e}")
             return False
-    
+
     def get_document_info(self, doc_id: str) -> Optional[Dict[str, Any]]:
         """Get information about a document"""
         return self._document_cache.get(doc_id)
-    
+
     def list_documents(self) -> List[Dict[str, Any]]:
         """List all documents in the system"""
         documents = []
         for doc_id, info in self._document_cache.items():
-            documents.append({
-                'doc_id': doc_id,
-                **info
-            })
+            documents.append({"doc_id": doc_id, **info})
         return documents
-    
+
     def clear_all_documents(self) -> bool:
         """Clear all documents from the system"""
         try:
