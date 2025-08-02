@@ -64,8 +64,8 @@ Comprehensive API documentation with interactive examples:
 ## Contributing Guidelines
 
 We welcome contributions from the community. Please review our:
-- [Contributing Guide](CONTRIBUTING.md)
-- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Contributing Guide](.github/CONTRIBUTING.md)
+- [Code of Conduct](.github/CODE_OF_CONDUCT.md)
 - [Security Policy](SECURITY.md)
 
 ## License
