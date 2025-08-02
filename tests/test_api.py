@@ -47,8 +47,45 @@ class TestHealthEndpoints:
         response = client.get("/health")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "healthy"
-        assert "services" in data
+        
+        # Check required fields
+        assert "status" in data
+        assert data["status"] in ["healthy", "degraded", "unhealthy"]
+        assert "timestamp" in data
+        assert "components" in data
+        assert "response_time_ms" in data
+        
+        # Check components structure
+        assert isinstance(data["components"], dict)
+        
+        # Check for expected component types (may or may not be present)
+        if "system" in data["components"]:
+            assert "status" in data["components"]["system"]
+        
+        if "models" in data["components"]:
+            assert "status" in data["components"]["models"]
+        
+        if "dependencies" in data["components"]:
+            assert isinstance(data["components"]["dependencies"], dict)
+            # Dependencies might be unhealthy in CI, just check structure
+            for dep_name, dep_info in data["components"]["dependencies"].items():
+                assert "status" in dep_info
+                assert dep_info["status"] in ["healthy", "unhealthy", "degraded", "unknown"]
+    
+    def test_readiness_check(self, client):
+        """Test readiness check endpoint"""
+        response = client.get("/ready")
+        # In CI environment without external services, this might return 503
+        assert response.status_code in [200, 503]
+        
+        if response.status_code == 200:
+            data = response.json()
+            assert data["status"] == "ready"
+            assert "timestamp" in data
+            assert "message" in data
+        else:
+            # Service not ready is acceptable in CI
+            assert response.json()["detail"] == "Service not ready"
 
 
 class TestDocumentEndpoints:
