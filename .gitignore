@@ -46,7 +46,12 @@ Thumbs.db
 .env.*.local
 
 # Data and logs
-data/
+data/uploads/*
+data/models/*
+data/cache/*
+!data/uploads/.gitkeep
+!data/models/.gitkeep
+!data/cache/.gitkeep
 logs/
 *.log
 
