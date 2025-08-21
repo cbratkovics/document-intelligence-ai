@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-@router.get("/health")
+@router.get("/health", tags=["health"], summary="Health check", operation_id="health_check")
 async def health_check() -> Dict[str, Any]:
     """
     Health check endpoint that verifies system components are working.
@@ -217,7 +217,7 @@ async def check_dependencies() -> Dict[str, Any]:
     return dependencies
 
 
-@router.get("/ready")
+@router.get("/ready", tags=["health"], summary="Readiness check", operation_id="readiness_check")
 async def readiness_check() -> Dict[str, Any]:
     """
     Readiness check endpoint for Kubernetes deployments.

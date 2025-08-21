@@ -165,33 +165,6 @@ async def root():
     }
 
 
-@app.get("/health", tags=["health"], summary="Health check")
-async def health_check():
-    """
-    Health check endpoint.
-
-    Returns the current health status of the API and its dependencies.
-    """
-    try:
-        # Check if we can import all necessary modules
-        from ..rag.retriever import RAGRetriever
-        from ..rag.generator import RAGGenerator
-
-        return {
-            "status": "healthy",
-            "version": settings.app_version,
-            "environment": settings.app_env,
-            "services": {
-                "api": "operational",
-                "embeddings": "operational",
-                "vector_store": "operational",
-            },
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return JSONResponse(
-            status_code=503, content={"status": "unhealthy", "error": str(e)}
-        )
 
 
 @app.exception_handler(Exception)
