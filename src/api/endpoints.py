@@ -87,7 +87,9 @@ generator = RAGGenerator()
 async def upload_document(
     file: UploadFile = File(..., description="Document file to upload"),
     metadata: Optional[str] = Body(
-        None, description="JSON metadata string", examples=upload_examples
+        None, 
+        description="JSON metadata string",
+        openapi_examples=upload_examples
     ),
 ):
     """
@@ -160,7 +162,7 @@ async def upload_document(
     responses=response_examples,
     response_model_exclude_none=True,
 )
-async def query_documents(request: QueryRequest = Body(..., examples=query_examples)):
+async def query_documents(request: QueryRequest = Body(..., openapi_examples=query_examples)):
     """
     Query documents and generate answers using RAG.
 
@@ -244,7 +246,7 @@ async def search_documents(request: QueryRequest):
     responses=response_examples,
 )
 async def advanced_search(
-    request: AdvancedSearchRequest = Body(..., examples=advanced_search_examples)
+    request: AdvancedSearchRequest = Body(..., openapi_examples=advanced_search_examples)
 ):
     """
     Advanced search with customizable search strategies.
