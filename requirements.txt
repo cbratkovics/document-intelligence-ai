@@ -4,7 +4,7 @@
 -r requirements-base.txt
 
 # For ML features, also install:
-# -r requirements-ml.txt
+-r requirements-ml.txt
 
 # For development:
 # -r requirements-dev.txt
