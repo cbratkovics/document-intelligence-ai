@@ -1,11 +1,15 @@
 # **Document Intelligence RAG System**
 
-[![CI/CD](https://github.com/cbratkovics/document-intelligence-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/cbratkovics/document-intelligence-ai/actions/workflows/ci.yml)
-[![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg)](https://codecov.io/gh/cbratkovics/document-intelligence-ai)
-[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Docker Image Size](https://img.shields.io/badge/docker-402MB-blue.svg)](https://hub.docker.com/r/cbratkovics/document-intelligence-ai)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Documentation](https://img.shields.io/badge/docs-passing-brightgreen.svg)](docs/)
+<div align="center">
+
+[![CI/CD](https://github.com/cbratkovics/document-intelligence-ai/actions/workflows/ci.yml/badge.svg?style=for-the-badge)](https://github.com/cbratkovics/document-intelligence-ai/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg?style=for-the-badge)](https://codecov.io/gh/cbratkovics/document-intelligence-ai)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg?style=for-the-badge)](https://www.python.org/downloads/)
+[![Docker Image Size](https://img.shields.io/badge/docker-402MB-blue.svg?style=for-the-badge)](https://hub.docker.com/r/cbratkovics/document-intelligence-ai)
+[![License](https://img.shields.io/badge/license-MIT-green.svg?style=for-the-badge)](LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-passing-brightgreen.svg?style=for-the-badge)](docs/)
+
+</div>
 
 > **Enterprise-ready Retrieval-Augmented Generation (RAG) platform** for intelligent document ingestion, semantic search, and question answering — optimized for **speed, accuracy, and scalability**.
 
