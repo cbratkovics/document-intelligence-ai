@@ -5,29 +5,29 @@
 [![CI/CD](https://github.com/cbratkovics/document-intelligence-ai/actions/workflows/ci.yml/badge.svg?style=for-the-badge)](https://github.com/cbratkovics/document-intelligence-ai/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/badge/coverage-85%25-brightgreen.svg?style=for-the-badge)](https://codecov.io/gh/cbratkovics/document-intelligence-ai)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg?style=for-the-badge)](https://www.python.org/downloads/)
-[![Docker Image Size](https://img.shields.io/badge/docker-402MB-blue.svg?style=for-the-badge)](https://hub.docker.com/r/cbratkovics/document-intelligence-ai)
 [![License](https://img.shields.io/badge/license-MIT-green.svg?style=for-the-badge)](LICENSE)
 [![Documentation](https://img.shields.io/badge/docs-passing-brightgreen.svg?style=for-the-badge)](docs/)
 
 </div>
 
-> **Enterprise-ready Retrieval-Augmented Generation (RAG) platform** for intelligent document ingestion, semantic search, and question answering — optimized for **speed, accuracy, and scalability**.
+> **Retrieval-Augmented Generation (RAG) system** for document ingestion, hybrid semantic search, and question answering.
 
-## **Key Performance Metrics**
+## **Capabilities**
 
-| Metric | Value | Impact |
-|--------|-------|--------|
-| **Cache Hit Rate** | **42%** | Semantic caching reduces redundant LLM calls |
-| **Docker Image** | **3.3GB → 402MB** | 88% reduction via multi-stage builds |
-| **Query Latency (P95)** | **<200ms** | Sub-second responses under load |
-| **Hybrid Search** | **ChromaDB + BM25** | 35% better recall than vector-only |
-| **Reranking Boost** | **+35% relevance** | Cross-encoder reranking improves precision |
+| Capability | Implementation |
+|------------|----------------|
+| **Hybrid Retrieval** | ChromaDB dense vectors fused with BM25 keyword ranking |
+| **Reranking** | Cross-encoder reranking over fused candidates |
+| **Semantic Caching** | Similarity-threshold cache to avoid repeat LLM calls |
+| **Chunking** | Semantic, sliding window, recursive, and sentence-based strategies |
+| **Container Build** | Multi-stage Docker build with split base and ML dependency layers |
 
 ---
 
+
 ## **Overview**
 
-The Document Intelligence RAG System processes and indexes large document corpora, enabling users to query, search, and extract insights in milliseconds. Built with a **microservices architecture**, it integrates semantic search with vector databases, hybrid ranking, and advanced caching strategies to deliver high performance under production workloads.
+The Document Intelligence RAG System ingests and indexes document corpora so they can be queried in natural language. It combines vector search over ChromaDB with BM25 keyword ranking, applies cross-encoder reranking to the fused results, and caches semantically similar queries to avoid redundant LLM calls.
 
 **Core capabilities:**
 
@@ -64,44 +64,19 @@ graph TD
 
 ---
 
-## **Performance Benchmarks**
+## **Performance and Evaluation**
 
-### **Retrieval Metrics**
-| Metric | Value | Dataset | Notes |
-|--------|-------|---------|-------|
-| **nDCG@10** | 0.82 | MS MARCO | Normalized Discounted Cumulative Gain |
-| **MRR@10** | 0.76 | Custom Eval Set | Mean Reciprocal Rank |
-| **Precision@5** | 0.84 | Internal Docs | Top-5 relevance accuracy |
-| **Recall@10** | 0.91 | Mixed Corpus | Coverage of relevant documents |
+This repository does not publish retrieval quality, latency, or throughput figures.
 
-### **Latency Breakdown**
-| Component | P50 | P95 | P99 |
-|-----------|-----|-----|-----|
-| **Embedding Generation** | 12ms | 25ms | 45ms |
-| **Vector Search (ChromaDB)** | 8ms | 15ms | 28ms |
-| **BM25 Ranking** | 5ms | 10ms | 18ms |
-| **Cross-Encoder Rerank** | 35ms | 60ms | 95ms |
-| **LLM Generation** | 120ms | 180ms | 250ms |
-| **Total E2E** | 140ms | 200ms | 320ms |
+Retrieval quality depends on your corpus, chunking strategy, and embedding model. Latency and
+throughput depend on your hardware, index size, and which LLM you call. Numbers measured against
+one corpus would not describe yours.
 
-### **Cache Effectiveness**
-| Cache Type | Hit Rate | Avg Savings | TTL Strategy |
-|------------|----------|-------------|--------------|
-| **Semantic Cache** | 42% | 150ms/query | Similarity-based (0.95 threshold) |
-| **Exact Match Cache** | 18% | 180ms/query | LRU with 1hr TTL |
-| **Document Cache** | 65% | 50ms/retrieval | 24hr TTL |
-
-### **Throughput & Scale**
-| Metric | Value | Configuration |
-|--------|-------|---------------|
-| **Document Ingestion** | 1,200 docs/hr | 4 Celery workers |
-| **Concurrent Queries** | 150 QPS | 8-core, 16GB RAM |
-| **Index Size** | 10M documents | 32GB ChromaDB instance |
-| **Batch Processing** | 5,000 docs/batch | Async with progress tracking |
-
-*See `/docs/benchmarks/` and `/eval/reports/` for detailed methodology and reproducible test suites.*
+`eval/retrieval_metrics.py` implements nDCG, MRR, precision@k, and recall@k so you can evaluate
+against your own labeled set and report what you measure.
 
 ---
+
 
 ## **Chunking Strategies**
 

@@ -1,5 +1,11 @@
 # Performance Optimization Journey
 
+> **Note on the figures below.** These sizes come from a one-off local build and are not
+> currently reproduced in CI. Other documents in this repository report different numbers for the
+> same images (see `docker/README.md`), so treat these as an account of an optimization effort
+> rather than as verified measurements. Run `docker build` against the current Dockerfiles and
+> `docker images` to get accurate sizes.
+
 ## Docker Image Optimization
 
 ### The Challenge

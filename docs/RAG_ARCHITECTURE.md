@@ -54,7 +54,7 @@ The Document Intelligence RAG System is a production-grade, enterprise-ready Ret
     │              Semantic Cache Layer                    │
     │  ┌──────────────┬──────────────┬────────────────┐  │
     │  │ Redis Cache  │ Similarity   │  TTL Strategy  │  │
-    │  │  (42% Hit)   │  Matching    │   Management   │  │
+    │  │  Redis Store │  Matching    │   Management   │  │
     │  └──────────────┴──────────────┴────────────────┘  │
     └────────────────────────┬────────────────────────────┘
                              │
@@ -162,17 +162,21 @@ Query → [Vector Search + BM25 Search] → Fusion → Reranking → Results
 3. Reranking: Sort by relevance scores
 4. Final selection: Return top-10
 
-**Performance**: +35% relevance improvement
+**Effect**: Reranking reorders the fused candidate set before generation. Measure the
+improvement on your own labeled set with `eval/retrieval_metrics.py`.
 
 ### 6. Semantic Caching
 
 **Cache Strategies**:
 
-| Type | Hit Rate | Savings | Description |
-|------|----------|---------|-------------|
-| **Semantic** | 42% | 150ms/query | Similarity-based matching |
-| **Exact Match** | 18% | 180ms/query | Hash-based exact matching |
-| **Document** | 65% | 50ms/retrieval | Cached document chunks |
+| Type | Description |
+|------|-------------|
+| **Semantic** | Similarity-based matching above a configurable threshold |
+| **Exact Match** | Hash-based exact matching |
+| **Document** | Cached document chunks |
+
+Hit rates depend entirely on how repetitive your query traffic is, so no figures are published
+here. Instrument your deployment to measure your own.
 
 **TTL Strategies**:
 - Fixed: Static expiration time
