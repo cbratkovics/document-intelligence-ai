@@ -92,9 +92,10 @@ jobs:
           format: table
           exit-code: "0"
       - name: Secret scan (enforced)
+        # No base/head inputs: the action takes the commit range from the push
+        # or pull_request event. Passing base=main on a push to main makes
+        # BASE == HEAD and the action exits with an error.
         uses: trufflesecurity/trufflehog@main
         with:
           path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
           extra_args: --only-verified
