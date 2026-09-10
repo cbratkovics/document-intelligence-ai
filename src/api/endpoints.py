@@ -1,410 +1,348 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Query, Body, Path
-from fastapi.responses import StreamingResponse
-from typing import List, Optional, Dict, Any
-import logging
-import json
-from pydantic import BaseModel, Field
+"""HTTP routes for documents, search, question answering, and evaluation."""
 
-from ..rag.retriever import RAGRetriever
-from ..rag.generator import RAGGenerator
-from ..core.config import settings
-from .examples import (
-    query_examples,
-    advanced_search_examples,
-    upload_examples,
-    response_examples,
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, Dict, List, Optional, Union
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, UploadFile
+from fastapi.responses import StreamingResponse
+
+from ..core.types import IngestionError, NotFoundError, RetrievalMode
+from ..rag.generator import Generator
+from ..rag.service import DocumentService
+from .deps import get_generator, get_service, require_api_key, require_configured_key
+from .schemas import (
+    DeleteResponse,
+    DocumentResponse,
+    ErrorResponse,
+    JudgeRequest,
+    QueryRequest,
+    SearchRequest,
+    UploadResponse,
 )
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_api_key)])
+
+_ERRORS: Dict[Union[int, str], Dict[str, Any]] = {
+    400: {"model": ErrorResponse},
+    401: {"model": ErrorResponse},
+    404: {"model": ErrorResponse},
+    413: {"model": ErrorResponse},
+    422: {"model": ErrorResponse},
+}
+
+_READ_CHUNK = 64 * 1024
 
 
-# Pydantic models for request/response
-class QueryRequest(BaseModel):
-    """Query request model"""
+async def _read_upload_bounded(upload: UploadFile, limit: int) -> bytes:
+    """Read the upload while enforcing the size limit, not after buffering it all."""
+    buffer = bytearray()
+    while True:
+        piece = await upload.read(_READ_CHUNK)
+        if not piece:
+            break
+        buffer.extend(piece)
+        if len(buffer) > limit:
+            raise HTTPException(status_code=413, detail=f"File exceeds the {limit} byte limit")
+    return bytes(buffer)
 
-    text: str = Field(..., min_length=1, description="Query text")
-    top_k: Optional[int] = Field(default=5, description="Number of results to return")
-    filters: Optional[Dict[str, Any]] = Field(
-        default=None, description="Metadata filters"
+
+def _parse_metadata(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    if raw is None or raw.strip() == "":
+        return None
+    if len(raw) > 8192:
+        raise HTTPException(status_code=400, detail="metadata JSON is too large")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="metadata must be valid JSON")
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="metadata must be a JSON object")
+    return parsed
+
+
+def _upload_response(result) -> UploadResponse:
+    return UploadResponse(
+        document=DocumentResponse(**result.record.to_public_dict()),
+        created=result.created,
+        duplicate_of=result.duplicate_of,
+        warnings=result.warnings,
+        timings_ms={k: round(v, 2) for k, v in result.timings_ms.items()},
     )
-    stream: Optional[bool] = Field(default=False, description="Stream the response")
 
 
-class AdvancedSearchRequest(BaseModel):
-    """Advanced search request model"""
-
-    text: str = Field(..., min_length=1, description="Search query text")
-    top_k: Optional[int] = Field(default=10, description="Number of results to return")
-    use_hybrid: Optional[bool] = Field(
-        default=True, description="Use hybrid search (vector + keyword)"
-    )
-    use_reranker: Optional[bool] = Field(
-        default=True, description="Use cross-encoder reranking"
-    )
-    alpha: Optional[float] = Field(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Weight for vector search in hybrid mode",
-    )
-    filters: Optional[Dict[str, Any]] = Field(
-        default=None, description="Metadata filters"
-    )
-
-
-class QueryResponse(BaseModel):
-    """Query response model"""
-
-    answer: str
-    sources: List[Dict[str, Any]]
-    confidence: float
-    processing_time: float
-
-
-class DocumentInfo(BaseModel):
-    """Document information model"""
-
-    doc_id: str
-    filename: str
-    chunks: int
-    added_at: str
-
-
-# Initialize services
-retriever = RAGRetriever()
-generator = RAGGenerator()
+# -- documents ---------------------------------------------------------------
 
 
 @router.post(
     "/documents/upload",
-    response_model=Dict[str, Any],
+    response_model=UploadResponse,
     tags=["documents"],
-    summary="Upload a document",
-    responses=response_examples,
+    summary="Upload and index a document",
+    responses=_ERRORS,
 )
 async def upload_document(
-    file: UploadFile = File(..., description="Document file to upload"),
-    metadata: Optional[str] = Body(
-        None, 
-        description="JSON metadata string",
-        openapi_examples=upload_examples
+    file: UploadFile = File(..., description="A .txt, .md, .rst or .pdf file"),
+    metadata: Optional[str] = Form(
+        None,
+        description='Optional flat JSON object of user metadata, e.g. {"team": "finance"}',
     ),
+    service: DocumentService = Depends(get_service),
 ):
+    """Ingest synchronously: validate, extract, chunk, embed (if configured), index.
+
+    The response is returned only after every required index write succeeded.
+    Re-uploading identical bytes returns the existing document (``created=false``).
     """
-    Upload a document for processing and indexing.
+    content = await _read_upload_bounded(file, service.settings.max_upload_size)
+    result = await service.ingest(file.filename, content, _parse_metadata(metadata))
+    return _upload_response(result)
 
-    Supported file types:
-    - PDF (.pdf)
-    - Text (.txt)
-    - Markdown (.md)
-    - reStructuredText (.rst)
 
-    Maximum file size: 10MB
+@router.post(
+    "/documents/{doc_id}/replace",
+    response_model=UploadResponse,
+    tags=["documents"],
+    summary="Replace a document with a new version",
+    responses=_ERRORS,
+)
+async def replace_document(
+    doc_id: str = Path(..., min_length=1, max_length=64),
+    file: UploadFile = File(...),
+    metadata: Optional[str] = Form(None),
+    service: DocumentService = Depends(get_service),
+):
+    """Index a new version; the previous version stays searchable until commit."""
+    content = await _read_upload_bounded(file, service.settings.max_upload_size)
+    result = await service.ingest(
+        file.filename, content, _parse_metadata(metadata), replace_doc_id=doc_id
+    )
+    return _upload_response(result)
 
-    The document will be:
-    1. Validated for type and size
-    2. Chunked into smaller segments
-    3. Embedded using OpenAI embeddings
-    4. Indexed for vector and keyword search
+
+@router.get(
+    "/documents",
+    response_model=List[DocumentResponse],
+    tags=["documents"],
+    summary="List documents",
+)
+async def list_documents(service: DocumentService = Depends(get_service)):
+    return [DocumentResponse(**d.to_public_dict()) for d in service.list_documents()]
+
+
+@router.get(
+    "/documents/{doc_id}",
+    response_model=DocumentResponse,
+    tags=["documents"],
+    summary="Get document status and details",
+    responses=_ERRORS,
+)
+async def get_document(doc_id: str, service: DocumentService = Depends(get_service)):
+    return DocumentResponse(**service.get_document(doc_id).to_public_dict())
+
+
+@router.get(
+    "/documents/{doc_id}/chunks",
+    tags=["documents"],
+    summary="Inspect a document's chunks in source order",
+    responses=_ERRORS,
+)
+async def get_document_chunks(
+    doc_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    service: DocumentService = Depends(get_service),
+):
+    record = service.get_document(doc_id)
+    chunks = service.get_chunks(doc_id, offset=offset, limit=limit)
+    return {
+        "doc_id": doc_id,
+        "version": record.version,
+        "chunk_count": record.chunk_count,
+        "offset": offset,
+        "limit": limit,
+        "chunks": [
+            {
+                "chunk_id": c.chunk_id,
+                "ordinal": c.ordinal,
+                "text": c.text,
+                "location": c.location.to_dict(),
+                "text_hash": c.text_hash,
+            }
+            for c in chunks
+        ],
+    }
+
+
+@router.delete(
+    "/documents/{doc_id}",
+    response_model=DeleteResponse,
+    tags=["documents"],
+    summary="Delete a document and all of its indexed data",
+    responses=_ERRORS,
+)
+async def delete_document(doc_id: str, service: DocumentService = Depends(get_service)):
+    """Removes manifest rows, chunks, vectors, the stored file, and cached answers.
+
+    A second delete of the same ID returns 404. If a required index removal
+    fails the response is 500 and the document stays excluded from retrieval
+    until a retry succeeds.
     """
-    try:
-        # Validate file size
-        content = await file.read()
-        if len(content) > settings.max_upload_size:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File too large. Maximum size is {settings.max_upload_size} bytes",
-            )
+    result = await service.delete_document(doc_id)
+    return DeleteResponse(
+        doc_id=result.doc_id,
+        status="deleted",
+        removed_chunks=result.removed_chunks,
+        removed_vectors=result.removed_vectors,
+        file_removed=result.file_removed,
+    )
 
-        # Validate file type
-        file_extension = file.filename.split(".")[-1].lower()
-        if f".{file_extension}" not in {".txt", ".pdf", ".md", ".rst"}:
-            raise HTTPException(
-                status_code=400, detail=f"Unsupported file type: {file_extension}"
-            )
 
-        # Parse metadata if provided
-        metadata_dict = json.loads(metadata) if metadata else {}
+@router.delete(
+    "/documents",
+    tags=["documents"],
+    summary="Delete every document (requires a configured API key)",
+    dependencies=[Depends(require_configured_key)],
+    responses={403: {"model": ErrorResponse}, **_ERRORS},
+)
+async def clear_all_documents(service: DocumentService = Depends(get_service)):
+    removed = await service.clear_all()
+    return {"status": "cleared", "documents_removed": removed}
 
-        # Add document
-        doc_id = await retriever.add_document(
-            filename=file.filename, content=content, metadata=metadata_dict
-        )
 
-        # Get document info to include chunks count
-        doc_info = retriever.get_document_info(doc_id)
-        chunks_created = doc_info.get("chunks", 0) if doc_info else 0
+@router.post(
+    "/documents/{doc_id}/summary",
+    tags=["documents"],
+    summary="Summarize a document from its ordered chunks",
+    responses=_ERRORS,
+)
+async def summarize_document(
+    doc_id: str,
+    max_chars: int = Query(500, ge=50, le=4000),
+    generator: Generator = Depends(get_generator),
+):
+    """Reads the document's own chunks in order (bounded by the context budget).
 
-        return {
-            "document_id": doc_id,
-            "filename": file.filename,
-            "status": "processed",
-            "message": "Document uploaded and processed successfully",
-            "chunks_created": chunks_created,
-        }
+    Without a generation provider the response carries ``status=excerpts_only``
+    and the leading text of the document instead of a generated summary.
+    """
+    return (await generator.summarize(doc_id, max_chars)).to_dict()
 
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid metadata JSON")
-    except HTTPException:
-        raise  # Re-raise HTTP exceptions to preserve status codes
-    except Exception as e:
-        logger.error(f"Error uploading document: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+# -- retrieval -----------------------------------------------------------------
+
+
+@router.post(
+    "/search",
+    tags=["search"],
+    summary="Search chunks (lexical, vector, or hybrid)",
+    responses=_ERRORS,
+)
+async def search(
+    request: SearchRequest,
+    generator: Generator = Depends(get_generator),
+):
+    """Returns ranked chunks with per-stage scores kept separate.
+
+    ``mode_effective`` tells you what actually ran; ``rerank_status`` tells you
+    whether reranking was applied, disabled, unavailable, or failed.
+    """
+    result = await generator.retriever.retrieve(
+        request.text,
+        top_k=request.top_k,
+        mode=RetrievalMode(request.mode),
+        doc_ids=request.doc_ids,
+        alpha=request.alpha,
+        use_reranker=request.use_reranker,
+    )
+    return {
+        "query": request.text,
+        "results": [h.to_dict() for h in result.hits],
+        "total": len(result.hits),
+        **result.to_dict(),
+    }
 
 
 @router.post(
     "/query",
-    response_model=QueryResponse,
     tags=["query"],
-    summary="Generate answer using RAG",
-    responses=response_examples,
-    response_model_exclude_none=True,
+    summary="Ask a question and get a citation-checked answer",
+    responses=_ERRORS,
 )
-async def query_documents(request: QueryRequest = Body(..., openapi_examples=query_examples)):
-    """
-    Query documents and generate answers using RAG.
-
-    This endpoint:
-    1. Performs semantic search to find relevant documents
-    2. Uses advanced search with hybrid mode and reranking
-    3. Generates a comprehensive answer using GPT-4
-    4. Returns source documents for transparency
-
-    For streaming responses, set `stream=true` in the request.
-    """
-    try:
-        # Generate answer
-        result = await generator.generate_answer(
-            question=request.text, include_sources=True
-        )
-
-        return QueryResponse(
-            answer=result["answer"],
-            sources=result.get("sources", []),
-            confidence=result.get("confidence", 0.0),
-            processing_time=result.get("processing_time", 0.0),
-        )
-
-    except Exception as e:
-        logger.error(f"Error querying documents: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/query/stream")
-async def query_documents_stream(request: QueryRequest):
-    """
-    Query documents with streaming response
-
-    Returns a streaming response for real-time answer generation
-    """
-    try:
-
-        async def generate():
-            async for token in generator.generate_answer_stream(request.text):
-                yield token.encode("utf-8")
-
-        return StreamingResponse(
-            generate(),
-            media_type="text/plain",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Content-Type-Options": "nosniff",
-            },
-        )
-
-    except Exception as e:
-        logger.error(f"Error in streaming query: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/search")
-async def search_documents(request: QueryRequest):
-    """
-    Search documents without generating answers
-
-    Returns raw search results with relevance scores
-    """
-    try:
-        results = await retriever.search(
-            query=request.text, top_k=request.top_k, filters=request.filters
-        )
-
-        return {"query": request.text, "results": results, "total": len(results)}
-
-    except Exception as e:
-        logger.error(f"Error searching documents: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+async def query(request: QueryRequest, generator: Generator = Depends(get_generator)):
+    """See ``status`` in the response: answered, unverified_citations,
+    insufficient_evidence, excerpts_only, or provider_error."""
+    result = await generator.answer(
+        request.text,
+        top_k=request.top_k,
+        mode=RetrievalMode(request.mode),
+        doc_ids=request.doc_ids,
+        alpha=request.alpha,
+        use_reranker=request.use_reranker,
+        generate=request.generate,
+    )
+    return result.to_dict()
 
 
 @router.post(
-    "/search/advanced",
-    tags=["search"],
-    summary="Advanced document search",
-    description="Perform advanced search with hybrid mode and reranking options",
-    responses=response_examples,
+    "/query/stream",
+    tags=["query"],
+    summary="Ask a question with a structured NDJSON event stream",
+    responses=_ERRORS,
+    response_class=StreamingResponse,
 )
-async def advanced_search(
-    request: AdvancedSearchRequest = Body(..., openapi_examples=advanced_search_examples)
-):
+async def query_stream(request: QueryRequest, generator: Generator = Depends(get_generator)):
+    """Newline-delimited JSON (``application/x-ndjson``), protocol version 1.
+
+    Events: ``meta`` -> ``sources`` -> zero or more ``delta`` (provisional
+    text) -> exactly one terminal ``done`` (with the citation-validated
+    ``status``/``answer``) or ``error``. Retrieval and scope validation happen
+    before the response starts, so those failures are ordinary HTTP errors.
     """
-    Advanced search with customizable search strategies.
+    events = generator.stream_answer(
+        request.text,
+        top_k=request.top_k,
+        mode=RetrievalMode(request.mode),
+        doc_ids=request.doc_ids,
+        alpha=request.alpha,
+        use_reranker=request.use_reranker,
+    )
+    first = await events.__anext__()  # surfaces validation errors as HTTP errors
 
-    Features:
-    - **Hybrid Search**: Combines vector embeddings with BM25 keyword search
-    - **Cross-Encoder Reranking**: Uses LLM to rerank results for better relevance
-    - **Configurable Weights**: Adjust balance between semantic and keyword matching
+    async def body():
+        try:
+            yield json.dumps(first) + "\n"
+            async for event in events:
+                yield json.dumps(event) + "\n"
+        finally:
+            await events.aclose()
 
-    Parameters:
-    - **use_hybrid**: Enable hybrid search (vector + BM25)
-    - **use_reranker**: Enable cross-encoder reranking
-    - **alpha**: Weight for vector search (0=keyword only, 1=vector only)
-    """
-    try:
-        results = await retriever.advanced_search(
-            query=request.text,
-            top_k=request.top_k,
-            use_hybrid=request.use_hybrid,
-            use_reranker=request.use_reranker,
-            alpha=request.alpha,
-            filters=request.filters,
-        )
-
-        return {
-            "query": request.text,
-            "results": results,
-            "total": len(results),
-            "search_config": {
-                "hybrid": request.use_hybrid,
-                "reranker": request.use_reranker,
-                "alpha": request.alpha,
-            },
-        }
-
-    except Exception as e:
-        logger.error(f"Error in advanced search: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return StreamingResponse(
+        body(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Stream-Protocol": "1"},
+    )
 
 
-@router.get("/documents", response_model=List[DocumentInfo])
-async def list_documents():
-    """
-    List all documents in the system
-
-    Returns a list of all indexed documents
-    """
-    try:
-        documents = retriever.list_documents()
-        return [DocumentInfo(**doc) for doc in documents]
-
-    except Exception as e:
-        logger.error(f"Error listing documents: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+@router.post(
+    "/evaluate/judge",
+    tags=["evaluation"],
+    summary="LLM rating of an answer (disclosed, optional)",
+    responses=_ERRORS,
+)
+async def judge_answer(request: JudgeRequest, generator: Generator = Depends(get_generator)):
+    """Returns ``status=unavailable`` without a provider and ``parse_failed``
+    when the judge output is not a valid score object. Never defaults scores."""
+    return await generator.judge_answer(request.question, request.answer, request.context)
 
 
-@router.get("/documents/{doc_id}")
-async def get_document(doc_id: str):
-    """
-    Get information about a specific document
-
-    - **doc_id**: Document ID
-    """
-    try:
-        doc_info = retriever.get_document_info(doc_id)
-        if not doc_info:
-            raise HTTPException(status_code=404, detail="Document not found")
-
-        return {"doc_id": doc_id, **doc_info}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting document: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+@router.get("/system/stats", tags=["health"], summary="Index statistics and consistency")
+async def system_stats(service: DocumentService = Depends(get_service)):
+    return {"stats": service.stats(), "consistency": service.consistency_report()}
 
 
-@router.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str):
-    """
-    Delete a document from the system
-
-    - **doc_id**: Document ID to delete
-    """
-    try:
-        success = retriever.delete_document(doc_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="Document not found")
-
-        return {"message": "Document deleted successfully", "doc_id": doc_id}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting document: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/documents/{doc_id}/summary")
-async def generate_document_summary(
-    doc_id: str,
-    max_length: Optional[int] = Query(
-        default=500, description="Maximum summary length"
-    ),
-):
-    """
-    Generate a summary for a specific document
-
-    - **doc_id**: Document ID
-    - **max_length**: Maximum summary length in characters
-    """
-    try:
-        summary = await generator.generate_summary(doc_id, max_length)
-
-        return {"doc_id": doc_id, "summary": summary, "max_length": max_length}
-
-    except Exception as e:
-        logger.error(f"Error generating summary: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.delete("/documents")
-async def clear_all_documents():
-    """
-    Clear all documents from the system
-
-    **Warning**: This will delete all indexed documents
-    """
-    try:
-        success = retriever.clear_all_documents()
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to clear documents")
-
-        return {"message": "All documents cleared successfully"}
-
-    except Exception as e:
-        logger.error(f"Error clearing documents: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/evaluate")
-async def evaluate_answer(
-    question: str = Body(...), answer: str = Body(...), context: str = Body(...)
-):
-    """
-    Evaluate the quality of an answer
-
-    - **question**: Original question
-    - **answer**: Generated answer
-    - **context**: Context used for generation
-    """
-    try:
-        evaluation = await generator.evaluate_answer_quality(
-            question=question, answer=answer, context=context
-        )
-
-        return evaluation
-
-    except Exception as e:
-        logger.error(f"Error evaluating answer: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+__all__ = ["router", "IngestionError", "NotFoundError"]

@@ -26,6 +26,7 @@ wheels/
 MANIFEST
 
 # Virtual environments
+.venv/
 venv/
 ENV/
 env/
@@ -46,10 +47,8 @@ Thumbs.db
 .env.local
 .env.*.local
 
-# Data and logs
-data/uploads/*
-data/models/*
-data/cache/*
+# Runtime data (manifest, uploads, vector index, model cache)
+data/*
 !data/uploads/.gitkeep
 !data/models/.gitkeep
 !data/cache/.gitkeep
@@ -77,3 +76,7 @@ redis_data/
 *.temp
 .temp/
 .tmp/
+
+# Evaluation artifacts (regenerate with python -m eval.run_eval)
+eval/results/*
+!eval/results/.gitkeep

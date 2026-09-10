@@ -1,39 +1,25 @@
-# ADR-0002: Use ChromaDB for Vector Storage
+# ADR-0002: Use embedded ChromaDB for vector storage
 
 ## Status
-Accepted
+Accepted (revised for 0.2.0)
 
 ## Context
-Document Intelligence AI requires a vector database for storing and searching document embeddings. The solution must support high-dimensional vectors, provide fast similarity search, and scale to millions of documents.
+The system needs a dense index for optional vector retrieval that runs
+locally without an external service, supports metadata filtering by document
+id, persists to disk, and lets the application supply its own embeddings.
 
 ## Decision
-We will use ChromaDB as our primary vector database.
+Use ChromaDB's embedded `PersistentClient` (or `EphemeralClient` in ephemeral
+mode) with a collection created explicitly in cosine space. The application
+always supplies embeddings; the collection has no embedding function, so
+Chroma never downloads a model. The embedding identity is stored in the
+collection metadata and checked at startup.
 
 ## Consequences
-
-### Positive
-- **Performance**: Optimized for fast similarity search with HNSW algorithm
-- **Ease of Use**: Simple API with Python-first design
-- **Flexibility**: Supports metadata filtering and hybrid search
-- **Persistence**: Built-in persistence with multiple backend options
-- **Active Development**: Regular updates and growing community
-
-### Negative
-- **Horizontal Scaling**: Limited compared to distributed solutions like Milvus
-- **Enterprise Features**: Fewer enterprise features than commercial alternatives
-- **Query Language**: Less sophisticated than some alternatives
-
-### Mitigation
-- Implement caching layer with Redis for frequently accessed vectors
-- Plan migration path to distributed solution if scale demands
-- Build abstraction layer to allow future database changes
-
-## Alternatives Considered
-1. **Pinecone**: Excellent performance but vendor lock-in and cost concerns
-2. **Weaviate**: Good features but more complex deployment
-3. **Milvus**: Better for massive scale but operational complexity
-4. **pgvector**: Simple but limited performance for our use case
-
-## References
-- [ChromaDB Documentation](https://docs.trychroma.com/)
-- [Vector Database Comparison](https://github.com/erikbern/ann-benchmarks)
+- Single-process, local deployment only; no Chroma server is required or
+  configured.
+- Cosine distance makes `1 - distance` a faithful similarity, which the
+  default L2 space would not.
+- Changing the embedding model requires deleting the index directory; the
+  application refuses to mix identities.
+- The manifest, not Chroma, is the source of truth for what is indexed.

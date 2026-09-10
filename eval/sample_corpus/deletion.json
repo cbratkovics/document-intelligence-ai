@@ -1,0 +1,6 @@
+{
+  "delete": "shipping-policy.md",
+  "query_after_delete": "SHP-2024-03 expedited delivery",
+  "must_not_return": ["shipping-policy.md"],
+  "replace": {"file": "remote-work-policy.txt", "new_text": "Northwind Outfitters remote work policy (HR-2025-01)\n\nSample data. The accessory stipend is now 300 dollars per year.\n", "query": "accessory stipend per year", "must_contain": "300 dollars", "must_not_contain": "250 dollars"}
+}

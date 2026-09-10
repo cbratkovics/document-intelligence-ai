@@ -1,1 +1,1 @@
-# Monitoring module for metrics and observability
+"""Optional Prometheus metrics."""

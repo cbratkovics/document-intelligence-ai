@@ -14,7 +14,7 @@ A clear and concise description of the bug.
 - **Version**: [e.g., 1.0.2]
 - **Python Version**: [e.g., 3.11.5]
 - **OS**: [e.g., Ubuntu 22.04]
-- **Deployment**: [e.g., Docker, Kubernetes, Local]
+- **Deployment**: [e.g., Docker, Local]
 
 ## Steps to Reproduce
 1. Configure the system with...

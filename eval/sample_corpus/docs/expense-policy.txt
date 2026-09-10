@@ -1,0 +1,18 @@
+Northwind Outfitters expense policy (FIN-2024-02)
+
+Sample data for evaluation. Northwind Outfitters is a fictional company.
+
+Meals
+Meals while travelling are reimbursed up to 60 dollars per day. Alcohol is not reimbursable.
+
+Travel
+Economy airfare is reimbursed when booked at least 14 days in advance. Rail travel in standard class is reimbursed without an advance booking requirement.
+
+Equipment
+The company provides a laptop and one external monitor. Employees may request a stipend of up to 250 dollars per year for a desk chair or accessories. The stipend is not available to contractors.
+
+Submission
+Expense claims must be submitted within 30 days of the expense date with itemised receipts. Claims older than 30 days are declined unless approved by a director.
+
+Approval
+Claims above 500 dollars require director approval before submission.

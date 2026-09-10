@@ -1,66 +1,65 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+## Unreleased (0.2.0)
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Repair-and-polish pass focused on correctness, honesty, and reproducible
+evidence. Breaking API changes are marked.
 
-## [Unreleased]
+### Runtime and data lifecycle
+- Services are created in the application lifespan and shared through
+  `app.state`; importing the app performs no I/O.
+- New SQLite manifest as the authoritative record of documents, versions,
+  chunks, source locations, lifecycle status, and configuration identity.
+- Staged ingestion with rollback; failed documents are visible as `failed`
+  and never searchable; identical bytes are deduplicated; explicit
+  replacement endpoint with version handling.
+- Deletion enumerates from the manifest (no 100-chunk assumption), removes
+  vectors, chunks, files, and cached answers, and reports incomplete
+  deletions instead of claiming success.
+- Chroma collection created with cosine space and embedding identity
+  metadata; incompatible indexes are refused at startup.
+- BM25 implemented in-repo with a Lucene-style IDF (the previous library
+  produced non-positive scores on tiny corpora) and rebuilt from the manifest.
+- LangChain removed from the runtime path; providers are called through the
+  OpenAI SDK lazily and only when configured.
 
-### Added
-- Enterprise-ready documentation structure
-- Security policy and vulnerability reporting process
-- Comprehensive API reference documentation
-- Architecture Decision Records (ADRs) framework
-- Professional CI/CD badge integration
+### Retrieval and generation
+- Document scope enforced in both retrieval branches; empty scope returns
+  nothing; unknown or non-ready documents are rejected.
+- Reciprocal rank fusion keyed by chunk id with explicit weights; zero-weight
+  branches contribute nothing.
+- Reranking reports `applied`/`disabled`/`unavailable`/`failed`; LLM scores
+  are parsed strictly with no default values.
+- Grounded prompting with delimited evidence, citation validation, and
+  distinct statuses for abstention, unverified citations, provider errors,
+  and excerpt-only mode. `confidence` replaced by `retrieval_diagnostics`.
+- Structured NDJSON streaming with exactly one terminal event.
+- Summaries read ordered chunks from the manifest and report coverage.
 
-### Changed
-- Restructured documentation into organized subdirectories
-- Updated README with professional tone and enterprise focus
-- Enhanced contributing guidelines with detailed standards
+### API (breaking)
+- `/query` and `/search` request models reject unknown fields; `filters` and
+  `stream` are gone, replaced by `doc_ids`, `mode`, `alpha`, `use_reranker`,
+  `generate`.
+- `/query/stream` returns `application/x-ndjson` events instead of raw text.
+- `/evaluate` moved to `/evaluate/judge` with strict parsing.
+- Optional `API_KEY` enforcement; `DELETE /documents` requires a configured key.
+- New: `/documents/{id}/chunks`, `/documents/{id}/replace`, `/system/stats`, `/ui`.
 
-### Security
-- Added security best practices documentation
-- Implemented security headers in API responses
-- Enhanced API key validation
+### Evaluation
+- Metrics rewritten with stated conventions; nDCG uses judgments and the
+  full ideal set; duplicates cannot inflate recall; comparisons align by
+  query id; zero-baseline relative change is undefined.
+- Labeled sample corpus and a runner that writes a provenance-stamped artifact.
 
-## [1.0.0] - 2024-08-02
+### Documentation and CI
+- README, architecture document, API reference, and security policy
+  rewritten around verified behavior; fabricated metrics, badges, and
+  enterprise-feature documents removed.
+- CI enforces lint, type checks, tests, offline evaluation runs, and a
+  container smoke test without provider secrets.
 
-### Added
-- Initial release of Document Intelligence AI platform
-- RESTful API for document processing and search
-- RAG-based question answering system
-- Multi-format document support (PDF, TXT, MD, RST)
-- Hybrid search combining vector and keyword matching
-- Real-time streaming responses
-- Prometheus metrics integration
-- Docker containerization with optimized images
-- Comprehensive test suite with 85% coverage
+## Earlier history
 
-### Performance
-- Optimized Docker image size from 3.31GB to 402MB (88% reduction)
-- Achieved <200ms p95 API response time
-- Implemented intelligent caching with Redis
-- Lazy loading for ML models
-
-### Security
-- API key-based authentication
-- Rate limiting implementation
-- Input validation and sanitization
-- Secure defaults for all configurations
-
-## [0.9.0] - 2024-07-15
-
-### Added
-- Beta release for testing
-- Core document processing functionality
-- Basic search capabilities
-- Initial API endpoints
-
-### Known Issues
-- Large Docker image size (resolved in 1.0.0)
-- Limited error handling (improved in 1.0.0)
-
-[Unreleased]: https://github.com/cbratkovics/document-intelligence-ai/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/cbratkovics/document-intelligence-ai/compare/v0.9.0...v1.0.0
-[0.9.0]: https://github.com/cbratkovics/document-intelligence-ai/releases/tag/v0.9.0
+Entries before 0.2.0 (including a "1.0.0" release with coverage, latency, and
+image-size figures) are preserved in Git history only. Those figures were not
+reproducible from the repository and are not carried forward.

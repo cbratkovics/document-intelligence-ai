@@ -1,530 +1,147 @@
-# API Reference Guide
+# API reference
 
-## Overview
-
-The Document Intelligence RAG System provides a RESTful API for document processing, semantic search, and question answering. Built with FastAPI, it offers automatic API documentation, streaming responses, and comprehensive monitoring.
-
-## Base URL
-
-```
-Development: http://localhost:8000
-API Endpoints: http://localhost:8000/api/v1
-```
-
-## Interactive Documentation
-
-FastAPI automatically generates interactive API documentation:
-- **Swagger UI**: `http://localhost:8000/docs`
-- **ReDoc**: `http://localhost:8000/redoc`
-- **OpenAPI Schema**: `http://localhost:8000/openapi.json`
+Base URL: `http://127.0.0.1:8000`. Interactive documentation is served at
+`/docs` (Swagger UI) and `/redoc`; the schema is at `/openapi.json`. A small
+review page is at `/ui`.
 
 ## Authentication
 
-The API supports API key authentication (configuration in progress). Include your API key in request headers:
+When the server is started with `API_KEY` set, every route under `/api/v1`
+requires the header `X-API-Key: <key>`. Without `API_KEY` the server is in
+local mode: no authentication, and `DELETE /api/v1/documents` (bulk delete)
+returns 403. Health endpoints never require a key.
 
-```http
-X-API-Key: your-api-key-here
-```
+## Errors
 
-## Rate Limiting
+Errors are JSON objects `{"error": "...", "code": "...", "request_id": "..."}`.
+Status codes are preserved: 400 invalid input, 401 missing/invalid key, 403
+operation unavailable, 404 unknown document, 409 mode or document not
+available, 413 upload too large, 422 schema validation (unknown fields are
+rejected), 500 internal or incomplete operation, 502 generation provider
+failure, 503 service not started.
 
-- **Document Upload**: 10 MB max file size
-- **Search Queries**: 100 requests per minute
-- **Document Processing**: 50 documents per hour
+## Documents
 
----
+### `POST /api/v1/documents/upload`
 
-## Core Endpoints
-
-### System Status
-
-#### `GET /`
-Root endpoint with API information.
-
-**Response:**
-```json
-{
-  "name": "Document Intelligence AI",
-  "version": "0.1.0",
-  "status": "operational",
-  "docs": "/docs",
-  "health": "/health"
-}
-```
-
-#### `GET /health`
-Comprehensive health check endpoint.
-
-**Response:**
-```json
-{
-  "status": "healthy",
-  "timestamp": "2025-01-21T10:00:00Z",
-  "components": {
-    "system": {
-      "status": "healthy",
-      "cpu_percent": 15.2,
-      "memory_percent": 45.3,
-      "disk_percent": 62.1
-    },
-    "chromadb": {
-      "status": "healthy",
-      "collections": 1,
-      "documents": 150
-    },
-    "redis": {
-      "status": "healthy",
-      "connected": true,
-      "ping_time_ms": 0.5
-    },
-    "openai": {
-      "status": "healthy",
-      "model": "text-embedding-ada-002"
-    }
-  },
-  "response_time_ms": 12.5
-}
-```
-
-#### `GET /metrics`
-Prometheus-compatible metrics endpoint for monitoring.
-
----
-
-### Document Management
-
-#### `POST /api/v1/documents/upload`
-Upload and process documents for indexing.
-
-**Request:**
-- Method: `POST`
-- Content-Type: `multipart/form-data`
-
-**Parameters:**
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| file | file | Yes | Document file (PDF, TXT, MD, RST) |
-| metadata | string | No | JSON metadata string |
-
-**Supported File Types:**
-- PDF (`.pdf`)
-- Text (`.txt`)
-- Markdown (`.md`)
-- reStructuredText (`.rst`)
-
-**Example Request:**
-```bash
-curl -X POST http://localhost:8000/api/v1/documents/upload \
-  -H "X-API-Key: your-api-key" \
-  -F "file=@document.pdf" \
-  -F 'metadata={"department":"engineering","version":"1.0"}'
-```
-
-**Response:**
-```json
-{
-  "document_id": "doc_abc123",
-  "filename": "document.pdf",
-  "status": "processed",
-  "message": "Document uploaded and processed successfully",
-  "chunks_created": 42
-}
-```
-
-#### `GET /api/v1/documents`
-List all documents in the system.
-
-**Response:**
-```json
-[
-  {
-    "doc_id": "doc_abc123",
-    "filename": "document.pdf",
-    "chunks": 42,
-    "added_at": "2025-01-21T10:00:00Z"
-  }
-]
-```
-
-#### `GET /api/v1/documents/{doc_id}`
-Get information about a specific document.
-
-**Path Parameters:**
-- `doc_id` (string): Document ID
-
-**Response:**
-```json
-{
-  "doc_id": "doc_abc123",
-  "filename": "document.pdf",
-  "chunks": 42,
-  "added_at": "2025-01-21T10:00:00Z"
-}
-```
-
-#### `DELETE /api/v1/documents/{doc_id}`
-Delete a document from the system.
-
-**Path Parameters:**
-- `doc_id` (string): Document ID
-
-**Response:**
-```json
-{
-  "message": "Document deleted successfully",
-  "doc_id": "doc_abc123"
-}
-```
-
-#### `POST /api/v1/documents/{doc_id}/summary`
-Generate a summary for a specific document.
-
-**Path Parameters:**
-- `doc_id` (string): Document ID
-
-**Query Parameters:**
-- `max_length` (integer): Maximum summary length (default: 500)
-
----
-
-### Search & Retrieval
-
-#### `POST /api/v1/search`
-Basic semantic search across documents.
-
-**Request Body:**
-```json
-{
-  "text": "What are the performance optimizations?",
-  "top_k": 5,
-  "filters": {
-    "department": "engineering"
-  }
-}
-```
-
-**Parameters:**
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| text | string | Yes | Search query text |
-| top_k | integer | No | Number of results (default: 5) |
-| filters | object | No | Metadata filters |
-
-**Response:**
-```json
-{
-  "query": "What are the performance optimizations?",
-  "results": [
-    {
-      "chunk_id": "chunk_123",
-      "content": "Performance optimizations include...",
-      "score": 0.92,
-      "metadata": {
-        "filename": "optimization_guide.pdf",
-        "page": 12
-      }
-    }
-  ],
-  "total": 5
-}
-```
-
-#### `POST /api/v1/search/advanced`
-Advanced hybrid search with customizable strategies.
-
-**Request Body:**
-```json
-{
-  "text": "Docker optimization techniques",
-  "top_k": 10,
-  "use_hybrid": true,
-  "use_reranker": true,
-  "alpha": 0.7,
-  "filters": null
-}
-```
-
-**Parameters:**
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| text | string | Yes | Search query text |
-| top_k | integer | No | Number of results (default: 10) |
-| use_hybrid | boolean | No | Enable hybrid search (default: true) |
-| use_reranker | boolean | No | Enable cross-encoder reranking (default: true) |
-| alpha | float | No | Vector search weight 0-1 (default: 0.7) |
-| filters | object | No | Metadata filters |
-
-**Features:**
-- **Hybrid Search**: Combines vector embeddings with BM25 keyword search
-- **Cross-Encoder Reranking**: Uses LLM to rerank results for better relevance
-- **Configurable Weights**: Adjust balance between semantic and keyword matching
-
-**Response:**
-```json
-{
-  "query": "Docker optimization techniques",
-  "results": [
-    {
-      "chunk_id": "chunk_456",
-      "content": "Multi-stage Docker builds can reduce image size by...",
-      "score": 0.94,
-      "metadata": {
-        "filename": "docker_guide.pdf",
-        "page": 8
-      }
-    }
-  ],
-  "total": 10,
-  "search_config": {
-    "hybrid": true,
-    "reranker": true,
-    "alpha": 0.7
-  }
-}
-```
-
----
-
-### Question Answering
-
-#### `POST /api/v1/query`
-Generate answers using RAG (Retrieval-Augmented Generation).
-
-**Request Body:**
-```json
-{
-  "text": "How do I optimize Docker image size?",
-  "top_k": 5,
-  "filters": null,
-  "stream": false
-}
-```
-
-**Parameters:**
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| text | string | Yes | Question or query text |
-| top_k | integer | No | Number of context chunks (default: 5) |
-| filters | object | No | Metadata filters |
-| stream | boolean | No | Stream the response (default: false) |
-
-**Process:**
-1. Performs semantic search to find relevant documents
-2. Uses advanced search with hybrid mode and reranking
-3. Generates comprehensive answer using GPT-4
-4. Returns source documents for transparency
-
-**Response:**
-```json
-{
-  "answer": "To optimize Docker image size, you should:\n\n1. Use multi-stage builds...",
-  "sources": [
-    {
-      "chunk_id": "chunk_456",
-      "content": "Multi-stage builds allow you to...",
-      "score": 0.94,
-      "metadata": {
-        "filename": "docker_guide.pdf",
-        "page": 8
-      }
-    }
-  ],
-  "confidence": 0.89,
-  "processing_time": 1.234
-}
-```
-
-#### `POST /api/v1/query/stream`
-Generate answers with real-time streaming response.
-
-**Request Body:**
-Same as `/api/v1/query`
-
-**Response:**
-Returns a streaming text response with:
-- Content-Type: `text/plain`
-- Cache-Control: `no-cache`
-- Real-time token streaming from the LLM
-
----
-
-## Configuration
-
-### Environment Variables
-
-The application uses the following environment variables:
-
-```bash
-# OpenAI Configuration
-OPENAI_API_KEY=your_openai_api_key
-
-# Redis Configuration  
-REDIS_URL=redis://localhost:6379
-
-# ChromaDB Configuration
-CHROMA_HOST=localhost
-CHROMA_PORT=8000
-
-# Application Settings
-APP_ENV=development
-LOG_LEVEL=INFO
-MAX_UPLOAD_SIZE=10485760  # 10MB in bytes
-CHUNK_SIZE=1000
-CHUNK_OVERLAP=200
-SEARCH_TOP_K=10
-
-# Model Settings
-EMBEDDING_MODEL=text-embedding-ada-002
-LLM_MODEL=gpt-4
-LLM_TEMPERATURE=0.7
-LLM_MAX_TOKENS=500
-```
-
----
-
-## Error Handling
-
-The API returns structured error responses:
+Multipart form: `file` (required; `.txt`, `.md`, `.rst`, `.pdf`), `metadata`
+(optional flat JSON object of strings, numbers, booleans; reserved keys such
+as `doc_id` are rejected). Returns after every index write has succeeded.
 
 ```json
 {
-  "detail": "Error message describing what went wrong"
+  "document": {"doc_id": "…", "version": 1, "filename": "refund-policy.md", "status": "ready",
+               "chunk_count": 4, "page_count": null, "content_hash": "…", "chunking_config": "chars:v2:size=1000:overlap=200",
+               "embedding_identity": null, "metadata": {}, "error": null, "...": "..."},
+  "created": true, "duplicate_of": null, "warnings": [], "timings_ms": {"extract": 1.2, "chunk": 0.4, "index_lexical": 2.1}
 }
 ```
 
-### HTTP Status Codes
+Uploading identical bytes again returns the existing document with
+`created=false` and `duplicate_of` set.
 
-| Status Code | Description |
-|-------------|-------------|
-| 200 | Success |
-| 400 | Bad Request - Invalid input |
-| 404 | Not Found - Resource doesn't exist |
-| 413 | Payload Too Large - File exceeds size limit |
-| 422 | Unprocessable Entity - Validation error |
-| 500 | Internal Server Error |
+### `POST /api/v1/documents/{doc_id}/replace`
 
----
+Same form as upload. Indexes a new version; the previous version stays
+searchable until the new one is committed.
 
-## Monitoring & Observability
+### `GET /api/v1/documents`, `GET /api/v1/documents/{doc_id}`
 
-### Metrics Collection
+List or fetch document records including `status`
+(`indexing`, `ready`, `failed`), `version`, `chunk_count`, `error`.
 
-The application tracks the following metrics via Prometheus:
+### `GET /api/v1/documents/{doc_id}/chunks?offset=0&limit=50`
 
-- `request_count` - Total requests by method, endpoint, and status
-- `request_latency` - Request duration in seconds
-- `active_requests` - Currently active requests
-- `document_processing_time` - Time to process documents
-- `search_latency` - Search operation duration
-- `cache_hit_rate` - Cache effectiveness
+Ordered chunks with `location` (`char_start`, `char_end` into the normalized
+extracted text; `page`/`page_end` for PDFs; `section` for Markdown headings).
 
-### System Information
+### `DELETE /api/v1/documents/{doc_id}`
 
-Available in health check responses:
-- CPU usage percentage
-- Memory usage (MB and percentage)
-- Disk usage (GB and percentage)
-- Process information (PID, threads, uptime)
-- Component connectivity status
+Removes chunks, vectors, the stored file, the manifest row, and cached
+answers. Returns counts. A second call returns 404. If a required index
+removal fails the response is 500 with code `deletion_incomplete` and the
+document remains excluded from retrieval until a retry succeeds.
 
----
+### `DELETE /api/v1/documents`
 
-## Docker Deployment
+Removes everything. Requires a configured and matching API key.
 
-### Using Docker Compose
+### `POST /api/v1/documents/{doc_id}/summary?max_chars=500`
 
-```bash
-# Start all services
-docker-compose -f docker/docker-compose.yml up -d
+Summarizes from the document's own ordered chunks. `status` is `ok`,
+`excerpts_only` (no generation provider), or `provider_error`; `coverage`
+reports how much of the document fit the context budget.
 
-# Services included:
-# - app: Main FastAPI application (port 8000)
-# - redis: Cache layer (port 6379)
-# - chromadb: Vector database (port 8001)
-# - prometheus: Metrics collection (port 9090)
-# - grafana: Monitoring dashboards (port 3000)
+## Retrieval
+
+### `POST /api/v1/search`
+
+```json
+{"text": "refund window", "mode": "hybrid", "top_k": 5, "doc_ids": null, "alpha": 0.5, "use_reranker": false}
 ```
 
-### Docker Image Variants
+- `mode`: `lexical`, `vector`, `hybrid`. `hybrid` without an embedding
+  provider runs lexical-only and reports `mode_effective: "lexical"` with a
+  note; `vector` without a provider returns 409.
+- `doc_ids`: restrict to these documents. `[]` matches nothing. Unknown ids
+  return 404.
+- `alpha`: dense weight in fusion (lexical weight is `1 - alpha`).
+- `use_reranker`: apply the configured reranker to the full candidate pool.
 
-- **Base** (`~600MB`): Production API with OpenAI embeddings
-- **ML** (`~900MB`): Includes local ML models
-- **Dev** (`~1GB`): Development with hot reload
+Response: `results` (each with `chunk_id`, `doc_id`, `version`, `ordinal`,
+`filename`, `text`, `location`, `metadata`, `scores` with separate
+`vector_distance`, `vector_similarity`, `vector_rank`, `lexical_score`,
+`lexical_rank`, `fusion_score`, `rerank_score`, and `rank`), plus
+`mode_requested`, `mode_effective`, `rerank_status`
+(`applied`/`disabled`/`unavailable`/`failed`), `reranker`, `scope`,
+`corpus_generation`, `timings_ms`, `notes`.
 
----
+## Question answering
 
-## Architecture Components
+### `POST /api/v1/query`
 
-### Core Technologies
+Same fields as search plus `generate` (default `true`). Response:
 
-- **FastAPI**: High-performance async web framework
-- **ChromaDB**: Vector database for embeddings
-- **Redis**: Caching and performance optimization
-- **OpenAI API**: Embeddings and text generation
-- **BM25 (rank-bm25)**: Keyword-based search
-- **Pydantic**: Request/response validation
+| Field | Meaning |
+|---|---|
+| `status` | `answered`, `unverified_citations`, `insufficient_evidence`, `excerpts_only`, `provider_error` |
+| `answer` | Generated text with `[S1]`-style markers, or `null` |
+| `citations` | Markers that resolve to context blocks: label, chunk id, document, filename, location, text |
+| `unknown_citations` | Markers the model emitted that were not in context |
+| `excerpts` | Supporting passages when no answer was generated |
+| `sources` | All retrieved hits with scores |
+| `context` | Budget, chars used, which chunk ids entered the prompt, `truncated` |
+| `retrieval_diagnostics` | Descriptive statistics of the retrieved set (not confidence) |
+| `generation` | `model`, `prompt_version`, `cached`, `error` |
 
-### RAG Pipeline
+### `POST /api/v1/query/stream`
 
-1. **Document Processing**:
-   - Multi-format support (PDF, TXT, MD, RST)
-   - Intelligent chunking strategies
-   - Metadata extraction
+`application/x-ndjson`, one JSON object per line, protocol version 1:
 
-2. **Hybrid Search**:
-   - Vector similarity (ChromaDB)
-   - Keyword matching (BM25)
-   - Cross-encoder reranking
+```
+{"event":"meta","v":1,"request_id":"…","retrieval":{…},"context":{…},"model":"openai:gpt-4o-mini"}
+{"event":"sources","sources":[…]}
+{"event":"delta","text":"Refunds are issued ","provisional":true}
+{"event":"done","status":"answered","answer":"…","citations":[…],"unknown_citations":[]}
+```
 
-3. **Answer Generation**:
-   - Context retrieval
-   - GPT-4 generation
-   - Source attribution
+Exactly one terminal event (`done` or `error`) is sent. `delta` text is
+provisional; only `done` carries the citation-validated answer. Scope and
+validation errors happen before the response starts and use normal HTTP
+status codes.
 
----
+### `POST /api/v1/evaluate/judge`
 
-## Performance Optimization
+`{"question", "answer", "context"}` -> an LLM rating with disclosed model and
+prompt version. `status` is `ok`, `parse_failed`, `provider_error`, or
+`unavailable`. It is not independent ground truth.
 
-### Caching Strategy
-- Redis caching for frequently accessed data
-- Document metadata caching
-- Search result caching with TTL
+## Health
 
-### Async Processing
-- Non-blocking I/O operations
-- Concurrent document processing
-- Streaming response support
-
-### Resource Management
-- Connection pooling for databases
-- Lazy loading of ML models
-- Automatic garbage collection
-
----
-
-## Best Practices
-
-1. **Document Upload**:
-   - Keep files under 10MB
-   - Use appropriate file formats
-   - Include relevant metadata
-
-2. **Search Optimization**:
-   - Use specific, descriptive queries
-   - Leverage metadata filters
-   - Enable hybrid search for better results
-
-3. **Performance**:
-   - Batch document uploads when possible
-   - Use streaming for long responses
-   - Monitor metrics for optimization
-
----
-
-## Support & Resources
-
-- **GitHub Repository**: [document-intelligence-ai](https://github.com/cbratkovics/document-intelligence-ai)
-- **Interactive API Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **Integration Examples**: [examples.md](examples.md)
-
-For additional help or bug reports, please open an issue on GitHub.
+- `GET /health`: liveness plus capabilities (storage mode, embedding provider
+  and identity, dense availability, reranker mode, generation provider, auth
+  mode) and any startup error.
+- `GET /ready`: 200 when storage is reachable and the indexes agree with the
+  manifest; 503 otherwise.
+- `GET /api/v1/system/stats`: counts and a consistency report.
+- `GET /metrics`: Prometheus text format (route-template labels).

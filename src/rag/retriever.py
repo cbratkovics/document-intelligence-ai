@@ -1,308 +1,246 @@
-from typing import List, Dict, Any, Optional, Tuple
-import logging
-from datetime import datetime
-import asyncio
+"""Scoped retrieval over the lexical and dense indexes.
 
-from langchain.schema import Document
-from ..core.vector_store import VectorStore
-from ..core.embeddings import EmbeddingService
-from ..core.chunking import DocumentChunker
-from ..utils.document_loader import DocumentLoader
-from ..core.config import settings
-from .hybrid_search import HybridSearch
-from .reranker import Reranker, SimpleReranker
+Scope is enforced in *both* candidate generators before fusion, again when
+hydrating from the manifest (only READY documents at their current version),
+and reranking sees the whole candidate pool before final truncation.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from typing import Dict, List, Optional, Sequence
+
+from ..core.config import Settings
+from ..core.lexical import LexicalHit
+from ..core.types import (
+    DocumentRecord,
+    DocumentStatus,
+    NotFoundError,
+    QueryScope,
+    RerankStatus,
+    RetrievalMode,
+    RetrievalResult,
+    SearchHit,
+)
+from ..core.vector_store import VectorHit
+from .hybrid_search import FusedCandidate, FusionConfig, reciprocal_rank_fusion
+from .reranker import Reranker, apply_reranker
+from .service import DocumentService
 
 logger = logging.getLogger(__name__)
 
 
-class RAGRetriever:
-    """RAG retriever for document search and retrieval"""
+class RetrievalRequestError(ValueError):
+    """Client-side request problem (bad top_k, unknown document, etc.)."""
 
-    def __init__(self):
-        self.vector_store = VectorStore()
-        self.embedding_service = EmbeddingService()
-        self.chunker = DocumentChunker()
-        self.document_loader = DocumentLoader()
-        self._document_cache = {}
-        self.hybrid_search = HybridSearch(self.vector_store)
-        self.reranker = Reranker()
-        self.simple_reranker = SimpleReranker()
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
 
-    async def add_document(
-        self, filename: str, content: bytes, metadata: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """
-        Add a document to the RAG system
 
-        Args:
-            filename: Document filename
-            content: Document content as bytes
-            metadata: Additional metadata
+class Retriever:
+    def __init__(
+        self, service: DocumentService, settings: Settings, reranker: Optional[Reranker] = None
+    ):
+        self.service = service
+        self.settings = settings
+        self.reranker = reranker
 
-        Returns:
-            Document ID
-        """
-        try:
-            # Save uploaded file
-            file_path = self.document_loader.save_uploaded_file(filename, content)
-
-            # Load document
-            document = self.document_loader.load_document(file_path, content)
-
-            # Add custom metadata
-            if metadata:
-                document.metadata.update(metadata)
-
-            # Chunk document
-            chunks = self.chunker.smart_chunk_document(document)
-
-            # Prepare for vector store
-            texts = [chunk.page_content for chunk in chunks]
-            metadatas = [chunk.metadata for chunk in chunks]
-
-            # Generate unique IDs for chunks
-            chunk_ids = [
-                f"{document.metadata['doc_id']}_{i}" for i in range(len(chunks))
-            ]
-
-            # Add to vector store
-            self.vector_store.add_documents(
-                documents=texts, metadatas=metadatas, ids=chunk_ids
+    # -- validation ------------------------------------------------------------
+    def validate_query(self, query: str) -> str:
+        query = (query or "").strip()
+        if not query:
+            raise RetrievalRequestError("query text must not be empty")
+        if len(query) > self.settings.max_query_chars:
+            raise RetrievalRequestError(
+                f"query text exceeds {self.settings.max_query_chars} characters"
             )
+        return query
 
-            # Add to hybrid search index
-            hybrid_docs = [
-                {"content": text, "metadata": metadata, "chunk_id": chunk_id}
-                for text, metadata, chunk_id in zip(texts, metadatas, chunk_ids)
-            ]
-            self.hybrid_search.add_documents(hybrid_docs)
+    def validate_top_k(self, top_k: Optional[int]) -> int:
+        if top_k is None:
+            return self.settings.search_top_k
+        if top_k < 1 or top_k > self.settings.max_top_k:
+            raise RetrievalRequestError(f"top_k must be between 1 and {self.settings.max_top_k}")
+        return top_k
 
-            # Cache document info
-            doc_id = document.metadata["doc_id"]
-            self._document_cache[doc_id] = {
-                "filename": filename,
-                "chunks": len(chunks),
-                "added_at": datetime.utcnow().isoformat(),
-            }
+    def resolve_scope(self, doc_ids: Optional[Sequence[str]]) -> QueryScope:
+        """Unknown or non-ready documents are rejected, never silently widened."""
+        if doc_ids is None:
+            return QueryScope.whole_corpus()
+        unique = list(dict.fromkeys(doc_ids))
+        for doc_id in unique:
+            try:
+                record = self.service.get_document(doc_id)
+            except NotFoundError:
+                raise RetrievalRequestError(f"Unknown document: {doc_id}", status=404)
+            if record.status != DocumentStatus.READY:
+                raise RetrievalRequestError(
+                    f"Document {doc_id} is not ready (status={record.status.value})",
+                    status=409,
+                )
+        return QueryScope.of(unique)
 
-            logger.info(f"Added document '{filename}' with {len(chunks)} chunks")
+    def resolve_mode(self, requested: RetrievalMode) -> tuple[RetrievalMode, List[str]]:
+        notes: List[str] = []
+        if (
+            requested in (RetrievalMode.VECTOR, RetrievalMode.HYBRID)
+            and not self.service.dense_available
+        ):
+            if requested == RetrievalMode.VECTOR:
+                raise RetrievalRequestError(
+                    "vector retrieval is unavailable: no embedding provider is configured",
+                    status=409,
+                )
+            notes.append("dense retrieval unavailable; ran lexical-only")
+            return RetrievalMode.LEXICAL, notes
+        return requested, notes
 
-            return doc_id
-
-        except Exception as e:
-            logger.error(f"Error adding document: {e}")
-            raise
-
-    async def search(
+    # -- retrieval ---------------------------------------------------------------
+    async def retrieve(
         self,
         query: str,
-        top_k: int = None,
-        filters: Optional[Dict[str, Any]] = None,
-        include_metadata: bool = True,
-    ) -> List[Dict[str, Any]]:
-        """
-        Search for relevant documents
+        *,
+        top_k: Optional[int] = None,
+        mode: RetrievalMode = RetrievalMode.HYBRID,
+        doc_ids: Optional[Sequence[str]] = None,
+        alpha: float = 0.5,
+        use_reranker: bool = False,
+        candidate_k: Optional[int] = None,
+    ) -> RetrievalResult:
+        query = self.validate_query(query)
+        top_k = self.validate_top_k(top_k)
+        if alpha < 0.0 or alpha > 1.0:
+            raise RetrievalRequestError("alpha must be within [0, 1]")
+        scope = self.resolve_scope(doc_ids)
+        effective, notes = self.resolve_mode(mode)
+        generation = self.service.manifest.corpus_generation()
+        timings: Dict[str, float] = {}
 
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            filters: Metadata filters
-            include_metadata: Whether to include metadata in results
-
-        Returns:
-            List of search results
-        """
-        try:
-            top_k = top_k or settings.search_top_k
-
-            # Search vector store
-            results = self.vector_store.search(
-                query=query, n_results=top_k, filter=filters
+        pool = candidate_k or min(
+            max(top_k * self.settings.candidate_multiplier, top_k), self.settings.max_top_k * 4
+        )
+        if scope.is_empty:
+            notes.append("empty document scope; nothing searched")
+            return RetrievalResult(
+                [], mode, effective, RerankStatus.DISABLED, None, scope, generation, timings, notes
             )
 
-            # Format results
-            formatted_results = []
-            for result in results:
-                formatted = {
-                    "content": result["content"],
-                    "relevance_score": result["similarity"],
-                    "chunk_id": result["id"],
-                }
+        lexical_hits: List[LexicalHit] = []
+        vector_hits: List[VectorHit] = []
+        if effective in (RetrievalMode.LEXICAL, RetrievalMode.HYBRID):
+            t0 = time.perf_counter()
+            lexical_hits = self.service.lexical.search(query, pool, scope)
+            timings["lexical_ms"] = (time.perf_counter() - t0) * 1000
+        if effective in (RetrievalMode.VECTOR, RetrievalMode.HYBRID):
+            embedder, store = self.service.embedder, self.service.vector_store
+            assert embedder is not None and store is not None  # guaranteed by resolve_mode
+            t0 = time.perf_counter()
+            embedding = await asyncio.to_thread(embedder.embed_query, query)
+            timings["embed_query_ms"] = (time.perf_counter() - t0) * 1000
+            t0 = time.perf_counter()
+            vector_hits = await asyncio.to_thread(store.query, embedding, pool, scope)
+            timings["vector_ms"] = (time.perf_counter() - t0) * 1000
 
-                if include_metadata:
-                    formatted["metadata"] = result["metadata"]
-
-                formatted_results.append(formatted)
-
-            # Filter by similarity threshold
-            formatted_results = [
-                r
-                for r in formatted_results
-                if r["relevance_score"] >= settings.similarity_threshold
+        if effective == RetrievalMode.HYBRID:
+            if alpha == 1.0:
+                notes.append("alpha=1.0: lexical branch carries no weight")
+            elif alpha == 0.0:
+                notes.append("alpha=0.0: dense branch carries no weight")
+            fused = reciprocal_rank_fusion(
+                vector_hits,
+                lexical_hits,
+                FusionConfig.from_alpha(alpha, rrf_k=self.settings.rrf_k),
+            )
+        elif effective == RetrievalMode.LEXICAL:
+            fused = [
+                FusedCandidate(
+                    h.chunk_id, fusion_score=None, lexical_rank=h.rank, lexical_score=h.score
+                )
+                for h in lexical_hits
+            ]
+        else:
+            fused = [
+                FusedCandidate(
+                    h.chunk_id, fusion_score=None, vector_rank=i + 1, vector_distance=h.distance
+                )
+                for i, h in enumerate(vector_hits)
             ]
 
-            logger.info(
-                f"Search for '{query[:50]}...' returned "
-                f"{len(formatted_results)} results"
-            )
+        hits = self._hydrate(fused, scope)
+        if self.settings.min_similarity is not None and effective == RetrievalMode.VECTOR:
+            hits = [
+                h
+                for h in hits
+                if h.vector_similarity is not None
+                and h.vector_similarity >= self.settings.min_similarity
+            ]
 
-            return formatted_results
-
-        except Exception as e:
-            logger.error(f"Error searching documents: {e}")
-            raise
-
-    async def advanced_search(
-        self,
-        query: str,
-        top_k: int = None,
-        use_hybrid: bool = True,
-        use_reranker: bool = True,
-        alpha: float = 0.7,
-        filters: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        Perform advanced search with hybrid search and reranking
-
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            use_hybrid: Whether to use hybrid search
-            use_reranker: Whether to use reranking
-            alpha: Weight for vector search in hybrid mode (0-1)
-            filters: Metadata filters
-
-        Returns:
-            List of search results
-        """
-        try:
-            top_k = top_k or settings.search_top_k
-
-            if use_hybrid:
-                # Use the new hybrid search
-                results = await self.hybrid_search.search(
-                    query=query,
-                    k=top_k * 2 if use_reranker else top_k,
-                    alpha=alpha,
-                    filters=filters,
+        rerank_status = RerankStatus.DISABLED
+        reranker_name = None
+        if use_reranker:
+            t0 = time.perf_counter()
+            outcome = await apply_reranker(self.reranker, query, hits)
+            timings["rerank_ms"] = (time.perf_counter() - t0) * 1000
+            hits = outcome.hits
+            rerank_status = outcome.status
+            reranker_name = outcome.reranker
+            if outcome.status == RerankStatus.UNAVAILABLE:
+                notes.append(
+                    f"reranking requested but reranker_mode={self.settings.reranker_mode} "
+                    "provides no reranker"
                 )
-            else:
-                # Fall back to standard vector search
-                results = await self.search(
-                    query, top_k * 2 if use_reranker else top_k, filters
+            elif outcome.status == RerankStatus.FAILED:
+                notes.append(f"reranking failed, original order kept: {outcome.error}")
+
+        hits = hits[:top_k]
+        for rank, hit in enumerate(hits, start=1):
+            hit.final_rank = rank
+        return RetrievalResult(
+            hits, mode, effective, rerank_status, reranker_name, scope, generation, timings, notes
+        )
+
+    def _hydrate(self, candidates: Sequence[FusedCandidate], scope: QueryScope) -> List[SearchHit]:
+        manifest = self.service.manifest
+        chunks = manifest.get_chunks_by_ids([c.chunk_id for c in candidates])
+        doc_cache: Dict[str, Optional[DocumentRecord]] = {}
+        hits: List[SearchHit] = []
+        for cand in candidates:
+            chunk = chunks.get(cand.chunk_id)
+            if chunk is None:
+                continue  # stale vector for a rolled-back or deleted version
+            if not scope.allows(chunk.doc_id):
+                continue
+            if chunk.doc_id not in doc_cache:
+                doc_cache[chunk.doc_id] = manifest.get_document(chunk.doc_id)
+            record = doc_cache[chunk.doc_id]
+            if (
+                record is None
+                or record.status != DocumentStatus.READY
+                or record.version != chunk.version
+            ):
+                continue
+            similarity = None
+            if cand.vector_distance is not None:
+                similarity = 1.0 - cand.vector_distance  # cosine space only
+            hits.append(
+                SearchHit(
+                    chunk_id=chunk.chunk_id,
+                    doc_id=chunk.doc_id,
+                    version=chunk.version,
+                    ordinal=chunk.ordinal,
+                    text=chunk.text,
+                    display_filename=record.display_filename,
+                    location=chunk.location,
+                    user_metadata=dict(record.user_metadata),
+                    vector_distance=cand.vector_distance,
+                    vector_similarity=similarity,
+                    vector_rank=cand.vector_rank,
+                    lexical_score=cand.lexical_score,
+                    lexical_rank=cand.lexical_rank,
+                    fusion_score=cand.fusion_score,
                 )
-
-            if use_reranker and results:
-                # Apply reranking
-                results = await self.reranker.rerank(query, results, top_k)
-
-            return results[:top_k]
-
-        except Exception as e:
-            logger.error(f"Error in advanced search: {e}")
-            raise
-
-    async def get_context_for_generation(
-        self, query: str, max_context_length: int = 3000
-    ) -> Tuple[str, List[Dict[str, Any]]]:
-        """
-        Get context for answer generation
-
-        Args:
-            query: User query
-            max_context_length: Maximum context length in characters
-
-        Returns:
-            Tuple of (context_string, source_documents)
-        """
-        try:
-            # Perform advanced search with hybrid and reranking
-            results = await self.advanced_search(
-                query, use_hybrid=True, use_reranker=True
             )
-
-            if not results:
-                return "", []
-
-            # Build context string
-            context_parts = []
-            total_length = 0
-            used_results = []
-
-            for result in results:
-                chunk_text = result["content"]
-                chunk_length = len(chunk_text)
-
-                if total_length + chunk_length > max_context_length:
-                    break
-
-                context_parts.append(chunk_text)
-                total_length += chunk_length
-                used_results.append(result)
-
-            context = "\n\n---\n\n".join(context_parts)
-
-            return context, used_results
-
-        except Exception as e:
-            logger.error(f"Error getting context: {e}")
-            raise
-
-    def delete_document(self, doc_id: str) -> bool:
-        """
-        Delete a document and all its chunks
-
-        Args:
-            doc_id: Document ID
-
-        Returns:
-            Success status
-        """
-        try:
-            # Get all chunk IDs for this document
-            chunk_ids = []
-            for i in range(100):  # Assume max 100 chunks per document
-                chunk_id = f"{doc_id}_{i}"
-                if self.vector_store.get_document(chunk_id):
-                    chunk_ids.append(chunk_id)
-                else:
-                    break
-
-            if chunk_ids:
-                self.vector_store.delete_documents(chunk_ids)
-
-                # Remove from cache
-                if doc_id in self._document_cache:
-                    del self._document_cache[doc_id]
-
-                logger.info(f"Deleted document {doc_id} with {len(chunk_ids)} chunks")
-                return True
-
-            return False
-
-        except Exception as e:
-            logger.error(f"Error deleting document: {e}")
-            return False
-
-    def get_document_info(self, doc_id: str) -> Optional[Dict[str, Any]]:
-        """Get information about a document"""
-        return self._document_cache.get(doc_id)
-
-    def list_documents(self) -> List[Dict[str, Any]]:
-        """List all documents in the system"""
-        documents = []
-        for doc_id, info in self._document_cache.items():
-            documents.append({"doc_id": doc_id, **info})
-        return documents
-
-    def clear_all_documents(self) -> bool:
-        """Clear all documents from the system"""
-        try:
-            self.vector_store.clear_collection()
-            self._document_cache.clear()
-            self.hybrid_search.clear()
-            logger.info("Cleared all documents")
-            return True
-        except Exception as e:
-            logger.error(f"Error clearing documents: {e}")
-            return False
+        return hits

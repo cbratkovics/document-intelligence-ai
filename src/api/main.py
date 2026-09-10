@@ -1,244 +1,267 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
+"""FastAPI application factory.
+
+Long-lived services (manifest, indexes, providers) are created in the lifespan
+handler and attached to ``app.state`` so every route shares one consistent
+view of the corpus. Importing this module performs no I/O.
+"""
+
+from __future__ import annotations
+
 import logging
-import os
 import time
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
+
+from ..core.config import Settings, get_settings
+from ..core.types import IndexCompatibilityError, IngestionError, NotFoundError
+from ..monitoring import metrics
+from ..rag.generator import Generator, ProviderError, build_chat_client
+from ..rag.reranker import build_reranker
+from ..rag.retriever import RetrievalRequestError, Retriever
+from ..rag.service import DocumentService
 from .endpoints import router
 from .health import router as health_router
-from ..core.config import settings
-from ..monitoring.metrics import (
-    request_count,
-    request_latency,
-    active_requests,
-    initialize_metrics,
-    system_info,
-)
-
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.log_level),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 
 logger = logging.getLogger(__name__)
 
+_STATIC_DIR = Path(__file__).parent / "static"
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Handle startup and shutdown events"""
-    # Startup
-    logger.info("Starting Document Intelligence API...")
+DESCRIPTION = """
+Document search and evidence-grounded question answering over a single local corpus.
 
-    # Create necessary directories
-    os.makedirs(settings.data_dir, exist_ok=True)
-    os.makedirs(settings.log_dir, exist_ok=True)
+**Supported formats**: .txt, .md, .rst (plain text), .pdf (text layer only).
 
-    # Initialize metrics
-    initialize_metrics(app_version=settings.app_version, environment=settings.app_env)
+**Retrieval modes**: `lexical` (BM25) always works; `vector` and `hybrid` need an
+embedding provider. Every response reports the mode that actually ran.
 
-    yield
+**Answers** are generated only when a generation provider is configured and are
+checked so that every citation resolves to a passage that was in the model's context.
+Without a provider the API returns the supporting excerpts instead.
 
-    # Shutdown
-    logger.info("Shutting down Document Intelligence API...")
-
-
-# Create FastAPI app
-app = FastAPI(
-    title=settings.app_name,
-    version=settings.app_version,
-    description="""
-## Document Intelligence API
-
-Production-grade document intelligence system using RAG (Retrieval-Augmented Generation) architecture.
-
-### Features
-- **Multi-format document processing**: PDF, TXT, Markdown, reStructuredText
-- **Advanced search capabilities**: 
-  - Vector search with semantic understanding
-  - Hybrid search combining vector and keyword (BM25)
-  - Cross-encoder reranking for improved relevance
-- **Streaming responses** for real-time interaction
-- **Comprehensive monitoring** with Prometheus metrics
-- **Scalable architecture** with Redis and ChromaDB
-
-### Authentication
-Currently using API key authentication. Pass your API key in the `X-API-Key` header.
-
-### Rate Limits
-- Document upload: 10 MB max file size
-- Search queries: 100 requests per minute
-- Document processing: 50 documents per hour
-
-### Getting Started
-1. Upload documents using `/api/v1/documents/upload`
-2. Search documents using `/api/v1/search/advanced`
-3. Generate answers using `/api/v1/query`
-
-For more information, see the [GitHub repository](https://github.com/cbratkovics/document-intelligence-ai).
-    """,
-    lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
-    openapi_tags=[
-        {
-            "name": "documents",
-            "description": "Document upload, management, and deletion operations",
-        },
-        {
-            "name": "search",
-            "description": "Search operations including vector, hybrid, and advanced search",
-        },
-        {"name": "query", "description": "RAG-based question answering and generation"},
-        {"name": "health", "description": "Health checks and system status"},
-        {"name": "metrics", "description": "Prometheus metrics and monitoring"},
-    ],
-)
-
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Include routers
-app.include_router(router, prefix="/api/v1")
-app.include_router(health_router)
-
-# Add Prometheus metrics endpoint
-try:
-    from prometheus_client import make_asgi_app
-
-    metrics_app = make_asgi_app()
-    app.mount("/metrics", metrics_app)
-except ImportError:
-    logger.warning("prometheus_client not installed, metrics endpoint disabled")
+**Access control**: when `API_KEY` is set every `/api/v1` route requires the
+`X-API-Key` header. Without it the server runs in local mode with no
+authentication, which is only appropriate on a trusted machine. There is no
+multi-tenant isolation: one process serves one corpus.
+"""
 
 
-# Add middleware for automatic metrics collection
-@app.middleware("http")
-async def track_requests(request: Request, call_next):
-    """Middleware to track all HTTP requests"""
-    start_time = time.time()
-    active_requests.inc()
-
-    try:
-        response = await call_next(request)
-        status = "success" if response.status_code < 400 else "error"
-    except Exception as e:
-        status = "error"
-        raise
-    finally:
-        duration = time.time() - start_time
-
-        # Only track API endpoints
-        if request.url.path.startswith("/api/"):
-            request_count.labels(
-                method=request.method, endpoint=request.url.path, status=status
-            ).inc()
-
-            request_latency.labels(
-                method=request.method, endpoint=request.url.path
-            ).observe(duration)
-
-        active_requests.dec()
-
-    return response
+def build_services(settings: Settings):
+    service = DocumentService.from_settings(settings)
+    chat = build_chat_client(settings)
+    reranker = build_reranker(settings, chat)
+    retriever = Retriever(service, settings, reranker)
+    generator = Generator(retriever, settings, chat)
+    return service, generator
 
 
-@app.get("/", tags=["health"], summary="Root endpoint")
-async def root():
-    """Root endpoint with API information"""
-    return {
-        "name": settings.app_name,
-        "version": settings.app_version,
-        "status": "operational",
-        "docs": "/docs",
-        "health": "/health",
-    }
-
-
-
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    """Global exception handler"""
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-            "message": str(exc) if settings.is_development else "An error occurred",
-        },
+def create_app(settings: Optional[Settings] = None) -> FastAPI:
+    settings = settings or get_settings()
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.settings = settings
+        app.state.service = None
+        app.state.generator = None
+        app.state.startup_error = None
+        try:
+            service, generator = build_services(settings)
+            app.state.service = service
+            app.state.generator = generator
+            metrics.initialize_metrics(
+                settings.app_version,
+                settings.app_env,
+                settings.resolved_embedding_provider,
+                settings.resolved_generation_provider,
+            )
+            logger.info(
+                "Started (storage=%s, embeddings=%s, generation=%s, reranker=%s, auth=%s)",
+                settings.storage_mode,
+                settings.resolved_embedding_provider,
+                settings.resolved_generation_provider,
+                settings.reranker_mode,
+                "api_key" if settings.api_key else "none",
+            )
+        except IndexCompatibilityError as exc:
+            app.state.startup_error = str(exc)
+            logger.error("Startup failed: %s", exc)
+        except Exception as exc:
+            app.state.startup_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("Startup failed")
+        yield
+        if app.state.service is not None:
+            app.state.service.close()
 
-# Custom OpenAPI schema
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-
-    from fastapi.openapi.utils import get_openapi
-
-    openapi_schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=app.description,
-        routes=app.routes,
-        tags=app.openapi_tags,
+    app = FastAPI(
+        title=settings.app_name,
+        version=settings.app_version,
+        description=DESCRIPTION,
+        lifespan=lifespan,
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
+        openapi_tags=[
+            {"name": "documents", "description": "Upload, inspect, replace, and delete documents"},
+            {"name": "search", "description": "Lexical, vector, and hybrid retrieval"},
+            {"name": "query", "description": "Grounded question answering"},
+            {"name": "evaluation", "description": "Optional LLM-based answer rating"},
+            {"name": "health", "description": "Liveness, readiness, statistics"},
+        ],
     )
+    app.state.settings = settings
 
-    # Add security scheme
-    openapi_schema["components"]["securitySchemes"] = {
-        "ApiKeyAuth": {
-            "type": "apiKey",
-            "in": "header",
-            "name": "X-API-Key",
-            "description": "API key for authentication",
+    origins = settings.cors_origin_list
+    if origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials="*" not in origins,
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=["Content-Type", "X-API-Key"],
+        )
+
+    app.include_router(router, prefix="/api/v1")
+    app.include_router(health_router)
+
+    if settings.metrics_enabled and metrics.AVAILABLE:
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+        @app.get("/metrics", include_in_schema=False)
+        async def metrics_endpoint() -> Response:
+            return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        request_id = uuid.uuid4().hex[:12]
+        request.state.request_id = request_id
+        start = time.perf_counter()
+        if metrics.AVAILABLE:
+            metrics.active_requests.inc()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            if metrics.AVAILABLE:
+                metrics.active_requests.dec()
+            route = request.scope.get("route")
+            template = getattr(route, "path", None) or "unmatched"
+            metrics.record_request(
+                request.method, template, status_code, time.perf_counter() - start
+            )
+
+    # -- error handling: preserve status codes, sanitize details -------------
+    def _error(request: Request, status: int, message: str, code: Optional[str] = None):
+        return JSONResponse(
+            status_code=status,
+            content={
+                "error": message,
+                "code": code,
+                "request_id": getattr(request.state, "request_id", None),
+            },
+        )
+
+    @app.exception_handler(IngestionError)
+    async def _ingestion_error(request: Request, exc: IngestionError):
+        return _error(request, exc.status, exc.message, exc.code)
+
+    @app.exception_handler(NotFoundError)
+    async def _not_found(request: Request, exc: NotFoundError):
+        return _error(request, 404, f"Document not found: {exc}", "not_found")
+
+    @app.exception_handler(RetrievalRequestError)
+    async def _retrieval_error(request: Request, exc: RetrievalRequestError):
+        return _error(request, exc.status, str(exc), "invalid_request")
+
+    @app.exception_handler(ProviderError)
+    async def _provider_error(request: Request, exc: ProviderError):
+        return _error(request, 502, f"Generation provider error: {exc}", "provider_error")
+
+    @app.exception_handler(HTTPException)
+    async def _http_error(request: Request, exc: HTTPException):
+        detail = exc.detail if isinstance(exc.detail, str) else None
+        payload = {
+            "error": detail or "Request failed",
+            "code": None,
+            "request_id": getattr(request.state, "request_id", None),
         }
-    }
+        if not isinstance(exc.detail, str):
+            payload["detail"] = exc.detail
+        return JSONResponse(status_code=exc.status_code, content=payload, headers=exc.headers)
 
-    # Add servers
-    openapi_schema["servers"] = [
-        {"url": "http://localhost:8000", "description": "Local development server"},
-        {
-            "url": "https://api.document-intelligence.com",
-            "description": "Production server",
-        },
-    ]
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request: Request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "Validation failed",
+                "code": "validation_error",
+                "detail": exc.errors(),
+                "request_id": getattr(request.state, "request_id", None),
+            },
+        )
 
-    # Add external docs
-    openapi_schema["externalDocs"] = {
-        "description": "GitHub Repository",
-        "url": "https://github.com/cbratkovics/document-intelligence-ai",
-    }
+    @app.exception_handler(Exception)
+    async def _unhandled(request: Request, exc: Exception):
+        logger.exception("Unhandled error (request %s)", getattr(request.state, "request_id", "?"))
+        message = (
+            f"{type(exc).__name__}: {exc}" if settings.is_development else "Internal server error"
+        )
+        return _error(request, 500, message, "internal_error")
 
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
-
-
-app.openapi = custom_openapi
-
-
-# Development-only endpoints
-if settings.is_development:
-
-    @app.get("/debug/config")
-    async def debug_config():
-        """Show current configuration (development only)"""
+    # -- root and review UI ------------------------------------------------------
+    @app.get("/", tags=["health"], summary="Service information")
+    async def root():
         return {
-            "app_env": settings.app_env,
-            "openai_model": settings.openai_model,
-            "embedding_model": settings.embedding_model,
-            "chunk_size": settings.chunk_size,
-            "chunk_overlap": settings.chunk_overlap,
-            "search_top_k": settings.search_top_k,
-            "similarity_threshold": settings.similarity_threshold,
+            "name": settings.app_name,
+            "version": settings.app_version,
+            "docs": "/docs",
+            "ui": "/ui",
+            "health": "/health",
+            "ready": "/ready",
         }
+
+    @app.get("/ui", include_in_schema=False)
+    async def review_ui():
+        page = _STATIC_DIR / "index.html"
+        if not page.is_file():
+            raise HTTPException(status_code=404, detail="Review UI not installed")
+        return FileResponse(page, headers={"Cache-Control": "no-cache"})
+
+    def custom_openapi():
+        if app.openapi_schema:
+            return app.openapi_schema
+        from fastapi.openapi.utils import get_openapi
+
+        schema = get_openapi(
+            title=app.title, version=app.version, description=app.description, routes=app.routes
+        )
+        schema.setdefault("components", {})["securitySchemes"] = {
+            "ApiKeyAuth": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Key",
+                "description": "Required on /api/v1 routes only when API_KEY is configured.",
+            }
+        }
+        schema["servers"] = [{"url": "/", "description": "This server"}]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
+    return app
+
+
+app = create_app()

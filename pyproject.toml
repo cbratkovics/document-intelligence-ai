@@ -1,5 +1,5 @@
 [tool.black]
-line-length = 88
+line-length = 100
 target-version = ['py311']
 include = '\.pyi?$'
 extend-exclude = '''
@@ -12,6 +12,8 @@ extend-exclude = '''
   | build
   | dist
   | venv
+  | \.venv
+  | app
 )/
 '''
 
@@ -22,36 +24,36 @@ include_trailing_comma = true
 force_grid_wrap = 0
 use_parentheses = true
 ensure_newline_before_comments = true
-line_length = 88
+line_length = 100
 skip_gitignore = true
+skip = ["app", ".venv"]
+known_first_party = ["src", "eval", "tests"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "-ra -q --strict-markers"
-testpaths = [
-    "tests",
-]
+testpaths = ["tests"]
 python_files = "test_*.py"
-python_classes = "Test*"
-python_functions = "test_*"
-markers = [
-    "asyncio: marks tests as async (deselect with '-m \"not asyncio\"')",
+filterwarnings = [
+    "ignore::DeprecationWarning:chromadb",
+    "ignore::DeprecationWarning:pydantic",
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20",
 ]
 
 [tool.mypy]
 python_version = "3.11"
-warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 ignore_missing_imports = true
-exclude = [
-    "venv/",
-    "build/",
-    "dist/",
-]
+check_untyped_defs = true
+exclude = ["venv/", ".venv/", "build/", "dist/", "app/"]
+
+[[tool.mypy.overrides]]
+module = "app.*"
+ignore_errors = true
 
 [tool.coverage.run]
-source = ["src"]
+source = ["src", "eval"]
 omit = [
     "*/tests/*",
     "*/test_*",

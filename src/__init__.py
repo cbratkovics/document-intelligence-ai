@@ -1,14 +1,7 @@
-"""
-Document Intelligence AI - Enterprise Document Processing Platform
+"""Document Intelligence RAG System.
 
-Copyright (c) 2024 Document Intelligence AI
-Licensed under the MIT License
-
-This package provides enterprise-grade document intelligence capabilities
-including document processing, vector search, and AI-powered Q&A.
+Document search and evidence-grounded question answering over a local corpus.
+Licensed under the MIT License.
 """
 
-__version__ = "1.0.0"
-__author__ = "Document Intelligence AI Team"
-__email__ = "engineering@document-intelligence.ai"
-__license__ = "MIT"
+__version__ = "0.2.0"

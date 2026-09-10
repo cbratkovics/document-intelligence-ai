@@ -1,214 +1,129 @@
-from typing import List, Dict, Any
-import re
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
-import logging
+"""Offset-preserving character chunker.
 
-from .config import settings
+Limits are in *characters* of the normalized extracted text. Every chunk
+records its ``[char_start, char_end)`` span, the page range it covers (PDF
+only), and the nearest preceding Markdown heading (Markdown only). The
+algorithm always makes progress, so it terminates for any input, and it never
+emits whitespace-only chunks.
+"""
 
-logger = logging.getLogger(__name__)
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from typing import List, Optional, Sequence
+
+from ..utils.document_loader import PageSpan, markdown_headings
+from .types import IngestionError, SourceLocation
+
+_BOUNDARIES: Sequence[str] = ("\n\n", "\n", ". ", "? ", "! ", "; ", ", ", " ")
 
 
-class DocumentChunker:
-    """Handles document chunking with various strategies"""
+@dataclass(frozen=True)
+class Chunk:
+    ordinal: int
+    text: str
+    location: SourceLocation
 
-    def __init__(
-        self,
-        chunk_size: int = None,
-        chunk_overlap: int = None,
-        length_function: callable = len,
-    ):
-        self.chunk_size = chunk_size or settings.chunk_size
-        self.chunk_overlap = chunk_overlap or settings.chunk_overlap
-        self.length_function = length_function
+    @property
+    def text_hash(self) -> str:
+        return hashlib.sha256(self.text.encode("utf-8")).hexdigest()[:16]
 
-        # Initialize the text splitter
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.chunk_size,
-            chunk_overlap=self.chunk_overlap,
-            length_function=self.length_function,
-            separators=["\n\n", "\n", ". ", " ", ""],
-            keep_separator=True,
-        )
 
-    def chunk_document(self, document: Document) -> List[Document]:
-        """
-        Split a document into chunks
+def _find_boundary(text: str, lo: int, hi: int) -> Optional[int]:
+    """Best split point in ``(lo, hi]`` preferring stronger separators."""
+    for sep in _BOUNDARIES:
+        idx = text.rfind(sep, lo, hi)
+        if idx != -1 and idx + len(sep) > lo:
+            return idx + len(sep)
+    return None
 
-        Args:
-            document: Document to chunk
 
-        Returns:
-            List of chunked documents with metadata
-        """
-        try:
-            # Split the document
-            chunks = self.text_splitter.split_documents([document])
+def _page_for(offset: int, pages: Sequence[PageSpan]) -> Optional[int]:
+    for span in pages:
+        if span.char_start <= offset < span.char_end:
+            return span.page_number
+    # Offsets that land in a separator between pages belong to the next page.
+    for span in pages:
+        if offset < span.char_start:
+            return span.page_number
+    return pages[-1].page_number if pages else None
 
-            # Enhance chunk metadata
-            for i, chunk in enumerate(chunks):
-                chunk.metadata.update(
-                    {
-                        "chunk_index": i,
-                        "total_chunks": len(chunks),
-                        "chunk_size": len(chunk.page_content),
-                        "original_doc_id": document.metadata.get("doc_id", ""),
-                        "source": document.metadata.get("source", ""),
-                    }
+
+def _section_for(offset: int, headings: Sequence[dict]) -> Optional[str]:
+    current = None
+    for heading in headings:
+        if int(heading["start"]) <= offset:
+            current = str(heading["title"])
+        else:
+            break
+    return current
+
+
+def chunk_text(
+    text: str,
+    *,
+    chunk_size: int,
+    chunk_overlap: int,
+    max_chunks: int,
+    pages: Sequence[PageSpan] = (),
+    extension: str = ".txt",
+) -> List[Chunk]:
+    """Split ``text`` into overlapping chunks with provenance."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if chunk_overlap < 0 or chunk_overlap >= chunk_size:
+        raise ValueError("chunk_overlap must be >= 0 and < chunk_size")
+    if max_chunks <= 0:
+        raise ValueError("max_chunks must be positive")
+
+    headings = markdown_headings(text) if extension == ".md" else []
+    length = len(text)
+    chunks: List[Chunk] = []
+    start = 0
+    min_step = max(1, chunk_size - chunk_overlap)
+
+    while start < length:
+        # Skip leading whitespace without losing offset accuracy.
+        while start < length and text[start].isspace():
+            start += 1
+        if start >= length:
+            break
+
+        end = min(start + chunk_size, length)
+        if end < length:
+            boundary = _find_boundary(text, start + chunk_size // 2, end)
+            if boundary is not None and boundary > start:
+                end = boundary
+
+        piece = text[start:end]
+        stripped = piece.rstrip()
+        real_end = start + len(stripped)
+        if stripped.strip():
+            if len(chunks) >= max_chunks:
+                raise IngestionError(
+                    f"Document produces more than {max_chunks} chunks",
+                    code="too_many_chunks",
                 )
-
-            logger.info(
-                f"Split document '{document.metadata.get('filename', 'Unknown')}' "
-                f"into {len(chunks)} chunks"
+            location = SourceLocation(
+                char_start=start,
+                char_end=real_end,
+                page=_page_for(start, pages) if pages else None,
+                page_end=_page_for(max(real_end - 1, start), pages) if pages else None,
+                section=_section_for(start, headings) if headings else None,
             )
+            chunks.append(Chunk(ordinal=len(chunks), text=stripped, location=location))
 
-            return chunks
+        if end >= length:
+            break
+        next_start = end - chunk_overlap
+        # Move the overlap start forward to a whitespace boundary if one exists
+        # inside the overlap region, so chunks do not start mid-word.
+        probe = text.find(" ", next_start, end)
+        if probe != -1 and probe + 1 < end:
+            next_start = probe + 1
+        if next_start <= start:
+            next_start = start + min_step
+        start = next_start
 
-        except Exception as e:
-            logger.error(f"Error chunking document: {e}")
-            raise
-
-    def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Document]:
-        """
-        Split raw text into chunks
-
-        Args:
-            text: Text to chunk
-            metadata: Optional metadata to attach to chunks
-
-        Returns:
-            List of Document objects
-        """
-        if metadata is None:
-            metadata = {}
-
-        # Create a temporary document
-        temp_doc = Document(page_content=text, metadata=metadata)
-
-        return self.chunk_document(temp_doc)
-
-    def smart_chunk_document(self, document: Document) -> List[Document]:
-        """
-        Smart chunking that tries to preserve semantic boundaries
-
-        Args:
-            document: Document to chunk
-
-        Returns:
-            List of chunked documents
-        """
-        text = document.page_content
-        metadata = document.metadata
-
-        # Check if it's a structured document (markdown, rst)
-        if metadata.get("extension") in [".md", ".rst"]:
-            return self._chunk_structured_document(document)
-
-        # For PDFs, try to preserve page boundaries when possible
-        if metadata.get("extension") == ".pdf" and "[Page" in text:
-            return self._chunk_pdf_document(document)
-
-        # Default to standard chunking
-        return self.chunk_document(document)
-
-    def _chunk_structured_document(self, document: Document) -> List[Document]:
-        """Chunk structured documents (markdown, rst) by sections"""
-        text = document.page_content
-        chunks = []
-
-        # Split by headers (markdown style)
-        sections = re.split(r"\n(?=#+ )", text)
-
-        current_chunk = ""
-        for section in sections:
-            if len(current_chunk) + len(section) > self.chunk_size:
-                if current_chunk:
-                    chunks.append(
-                        Document(
-                            page_content=current_chunk.strip(),
-                            metadata=document.metadata.copy(),
-                        )
-                    )
-                current_chunk = section
-            else:
-                current_chunk += "\n" + section if current_chunk else section
-
-        if current_chunk:
-            chunks.append(
-                Document(
-                    page_content=current_chunk.strip(),
-                    metadata=document.metadata.copy(),
-                )
-            )
-
-        # If no sections found or too few chunks, fall back to standard chunking
-        if len(chunks) <= 1:
-            return self.chunk_document(document)
-
-        # Update metadata
-        for i, chunk in enumerate(chunks):
-            chunk.metadata.update(
-                {"chunk_index": i, "total_chunks": len(chunks), "chunk_type": "section"}
-            )
-
-        return chunks
-
-    def _chunk_pdf_document(self, document: Document) -> List[Document]:
-        """Chunk PDF documents trying to preserve page boundaries"""
-        text = document.page_content
-        chunks = []
-
-        # Split by page markers
-        pages = re.split(r"\[Page \d+\]\n", text)
-        page_numbers = re.findall(r"\[Page (\d+)\]", text)
-
-        for i, (page_text, page_num) in enumerate(zip(pages[1:], page_numbers)):
-            if not page_text.strip():
-                continue
-
-            # If page is too long, chunk it further
-            if len(page_text) > self.chunk_size:
-                page_doc = Document(
-                    page_content=page_text,
-                    metadata={**document.metadata, "page_number": int(page_num)},
-                )
-                page_chunks = self.chunk_document(page_doc)
-                chunks.extend(page_chunks)
-            else:
-                chunks.append(
-                    Document(
-                        page_content=page_text.strip(),
-                        metadata={
-                            **document.metadata,
-                            "page_number": int(page_num),
-                            "chunk_type": "page",
-                        },
-                    )
-                )
-
-        # Update metadata
-        for i, chunk in enumerate(chunks):
-            chunk.metadata.update({"chunk_index": i, "total_chunks": len(chunks)})
-
-        return chunks if chunks else self.chunk_document(document)
-
-    def get_chunk_statistics(self, chunks: List[Document]) -> Dict[str, Any]:
-        """Get statistics about chunks"""
-        if not chunks:
-            return {
-                "total_chunks": 0,
-                "avg_chunk_size": 0,
-                "min_chunk_size": 0,
-                "max_chunk_size": 0,
-                "total_size": 0,
-            }
-
-        chunk_sizes = [len(chunk.page_content) for chunk in chunks]
-
-        return {
-            "total_chunks": len(chunks),
-            "avg_chunk_size": sum(chunk_sizes) / len(chunk_sizes),
-            "min_chunk_size": min(chunk_sizes),
-            "max_chunk_size": max(chunk_sizes),
-            "total_size": sum(chunk_sizes),
-        }
+    return chunks

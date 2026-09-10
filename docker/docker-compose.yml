@@ -1,69 +1,26 @@
-version: '3.8'
-
+# Local run of the API with persistent storage. No external services are
+# required: the manifest is SQLite and the vector index is embedded Chroma.
+#
+#   docker compose -f docker/docker-compose.yml up --build
+#
+# Set OPENAI_API_KEY in your shell (or a .env file next to this compose file)
+# to enable dense retrieval and answer generation.
 services:
   app:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      target: runtime
     ports:
       - "8000:8000"
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - REDIS_URL=redis://redis:6379
-      - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8000
-    depends_on:
-      - redis
-      - chromadb
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      API_KEY: ${API_KEY:-}
+      STORAGE_MODE: persistent
+      DATA_DIR: /app/data
+      LOG_LEVEL: INFO
     volumes:
-      - ../src:/app/src
-      - ../data:/app/data
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-
-  chromadb:
-    image: chromadb/chroma:0.4.22
-    ports:
-      - "8001:8000"
-    environment:
-      - IS_PERSISTENT=TRUE
-      - PERSIST_DIRECTORY=/chroma/chroma
-    volumes:
-      - chroma_data:/chroma/chroma
-
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-    depends_on:
-      - app
-
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana_data:/var/lib/grafana
-    depends_on:
-      - prometheus
+      - doc-intel-data:/app/data
 
 volumes:
-  redis_data:
-  chroma_data:
-  prometheus_data:
-  grafana_data:
+  doc-intel-data:

@@ -1,0 +1,16 @@
+{
+  "q01": {"refund-policy.md": 2, "shipping-policy.md": 1},
+  "q02": {"refund-policy.md": 2},
+  "q03": {"shipping-policy.md": 2},
+  "q04": {"shipping-policy.md": 2, "refund-policy.md": 1},
+  "q05": {"remote-work-policy.txt": 2, "expense-policy.txt": 2},
+  "q06": {"remote-work-policy.txt": 2},
+  "q07": {"security-incident-procedure.md": 2},
+  "q08": {"onboarding-checklist.md": 2, "remote-work-policy.txt": 1, "expense-policy.txt": 1},
+  "q09": {"security-incident-procedure.md": 2},
+  "q10": {},
+  "q11": {},
+  "q12": {"expense-policy.txt": 2},
+  "q13": {"shipping-policy.md": 2},
+  "q14": {"refund-policy.md": 2}
+}

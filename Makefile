@@ -1,71 +1,52 @@
-.PHONY: help install dev test lint format clean docker-build docker-up docker-down
+.PHONY: help install install-ml install-dev dev test lint format eval docker-build docker-smoke clean
 
 help:
-	@echo "Available commands:"
-	@echo "  make install      Install dependencies"
-	@echo "  make dev          Run development server"
-	@echo "  make test         Run tests"
-	@echo "  make lint         Run linting"
-	@echo "  make format       Format code"
-	@echo "  make clean        Clean up temporary files"
-	@echo "  make docker-build Build Docker image"
-	@echo "  make docker-up    Start Docker services"
-	@echo "  make docker-down  Stop Docker services"
+	@echo "make install       core dependencies (offline-capable)"
+	@echo "make install-ml    add OpenAI client and local-model libraries"
+	@echo "make install-dev   add test and lint tooling"
+	@echo "make dev           run the API on http://127.0.0.1:8000"
+	@echo "make test          run the test suite"
+	@echo "make lint          black/isort/flake8/mypy/bandit checks"
+	@echo "make format        apply black and isort"
+	@echo "make eval          offline evaluation run (lexical, no key)"
+	@echo "make docker-build  build the runtime image"
+	@echo "make docker-smoke  build then ingest/search inside a container"
 
 install:
 	pip install -r requirements.txt
 
+install-ml:
+	pip install -r requirements-ml.txt
+
+install-dev:
+	pip install -r requirements-dev.txt
+
 dev:
-	uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
+	uvicorn src.api.main:app --reload --host 127.0.0.1 --port 8000
 
 test:
-	pytest tests/ -v
-
-test-coverage:
-	pytest tests/ --cov=src --cov-report=html --cov-report=term
+	pytest tests -q
 
 lint:
-	pip install flake8 black isort mypy
-	flake8 src/ tests/
-	black --check src/ tests/
-	isort --check-only src/ tests/
-	mypy src/
+	black --check src tests eval
+	isort --check-only src tests eval
+	flake8 src tests eval
+	mypy src
+	bandit -r src -ll -q
 
 format:
-	pip install black isort
-	black src/ tests/
-	isort src/ tests/
+	black src tests eval
+	isort src tests eval
+
+eval:
+	python -m eval.run_eval --embedding none
+
+docker-build:
+	docker build -f docker/Dockerfile --target runtime -t doc-intel:local .
+
+docker-smoke: docker-build
+	bash scripts/docker/smoke_test.sh doc-intel:local
 
 clean:
 	find . -type d -name "__pycache__" -exec rm -rf {} +
-	find . -type f -name "*.pyc" -delete
-	rm -rf .pytest_cache
-	rm -rf .coverage
-	rm -rf htmlcov
-	rm -rf .mypy_cache
-
-docker-build:
-	docker build -f docker/Dockerfile -t document-intelligence-ai:latest .
-
-docker-up:
-	docker-compose -f docker/docker-compose.yml up -d
-
-docker-down:
-	docker-compose -f docker/docker-compose.yml down
-
-docker-logs:
-	docker-compose -f docker/docker-compose.yml logs -f
-
-docker-shell:
-	docker-compose -f docker/docker-compose.yml exec app /bin/bash
-
-# Development database commands
-db-reset:
-	docker-compose -f docker/docker-compose.yml down -v
-	docker-compose -f docker/docker-compose.yml up -d chromadb redis
-
-# Quick start for development
-quickstart: install
-	cp .env.example .env
-	@echo "Please edit .env and add your API keys"
-	@echo "Then run 'make dev' to start the development server"
+	rm -rf .pytest_cache .mypy_cache htmlcov .coverage

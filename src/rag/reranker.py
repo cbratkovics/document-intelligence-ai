@@ -1,220 +1,199 @@
-from typing import List, Dict, Any, Tuple, Optional
-import logging
-from langchain_openai import ChatOpenAI
-from ..core.config import settings
+"""Reranking modes.
+
+- ``heuristic``: term-overlap scoring; cheap, no model, weak.
+- ``llm``: prompt-based relevance scoring through the generation provider.
+  Responses are parsed strictly; a response that is not a number is a failure,
+  never a default score. Concurrency and candidate count are bounded.
+- ``cross_encoder``: the transformer cross-encoder in
+  ``app/reranking/cross_encoder.py`` (optional ML dependencies, local model
+  prepared in advance; no download at request time).
+
+Whatever the mode, a failed rerank keeps the original candidate order and is
+reported with ``RerankStatus.FAILED`` instead of fabricating scores.
+"""
+
+from __future__ import annotations
+
 import asyncio
+import logging
+import os
+import re
+from dataclasses import dataclass
+from typing import Any, List, Optional, Protocol, Sequence
+
+from ..core.config import Settings
+from ..core.lexical import tokenize
+from ..core.types import RerankStatus, SearchHit
 
 logger = logging.getLogger(__name__)
 
 
-class Reranker:
-    """
-    Cross-encoder style reranking using LLM for better relevance.
-    Since we're using OpenAI API, we'll implement a prompt-based reranker.
-    """
+class RerankError(Exception):
+    pass
 
-    def __init__(self, model_name: Optional[str] = None):
-        self.llm = ChatOpenAI(
-            model=model_name or settings.openai_model,
-            temperature=0.0,
-            openai_api_key=settings.openai_api_key,
+
+class Reranker(Protocol):
+    name: str
+
+    async def score(self, query: str, hits: Sequence[SearchHit]) -> List[float]:
+        ...
+
+
+class HeuristicReranker:
+    """Query-term coverage plus exact-phrase bonus. Not a relevance model."""
+
+    name = "heuristic:term-overlap"
+
+    async def score(self, query: str, hits: Sequence[SearchHit]) -> List[float]:
+        terms = set(tokenize(query))
+        phrase = query.strip().lower()
+        scores: List[float] = []
+        for hit in hits:
+            if not terms:
+                scores.append(0.0)
+                continue
+            doc_terms = set(tokenize(hit.text))
+            coverage = len(terms & doc_terms) / len(terms)
+            bonus = 0.25 if phrase and phrase in hit.text.lower() else 0.0
+            scores.append(min(1.0, coverage + bonus))
+        return scores
+
+
+_SCORE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*(?:/\s*10)?\s*\.?\s*$")
+
+
+class LLMReranker:
+    """Scores each candidate 0-10 with the chat model. Paid per candidate."""
+
+    def __init__(self, chat_client, model_name: str, max_candidates: int, concurrency: int):
+        self._client = chat_client
+        self.name = f"llm:{model_name}"
+        self.max_candidates = max(1, max_candidates)
+        self._semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def _score_one(self, query: str, text: str) -> float:
+        system = (
+            "You rate how well a passage answers a query. Reply with a single "
+            "number from 0 (irrelevant) to 10 (fully answers). Reply with the "
+            "number only."
         )
-        self.max_concurrent = 5  # Limit concurrent API calls
+        user = f"Query:\n{query}\n\nPassage:\n<passage>\n{text[:2000]}\n</passage>"
+        async with self._semaphore:
+            raw = await self._client.complete(system, user, max_tokens=8, temperature=0.0)
+        match = _SCORE_RE.match(raw or "")
+        if not match:
+            raise RerankError(f"Unparseable relevance score: {raw!r}")
+        value = float(match.group(1))
+        if value < 0.0 or value > 10.0:
+            raise RerankError(f"Relevance score out of range: {value}")
+        return value / 10.0
 
-    async def rerank(
-        self, query: str, documents: List[Dict[str, Any]], top_k: int = 5
-    ) -> List[Dict[str, Any]]:
-        """
-        Rerank documents using LLM-based relevance scoring.
+    async def score(self, query: str, hits: Sequence[SearchHit]) -> List[float]:
+        if len(hits) > self.max_candidates:
+            raise RerankError(
+                f"{len(hits)} candidates exceed llm_rerank_max_candidates=" f"{self.max_candidates}"
+            )
+        return list(await asyncio.gather(*(self._score_one(query, h.text) for h in hits)))
 
-        Args:
-            query: The search query
-            documents: List of documents to rerank
-            top_k: Number of top documents to return
 
-        Returns:
-            List of reranked documents with scores
-        """
-        if not documents:
-            return []
+class CrossEncoderAdapter:
+    """Lazy adapter around ``app.reranking.cross_encoder.CrossEncoderReranker``."""
 
-        # Limit documents to avoid excessive API calls
-        max_docs = min(len(documents), 20)
-        docs_to_rerank = documents[:max_docs]
+    def __init__(self, model_name: str, device: str, allow_download: bool):
+        self.name = f"cross_encoder:{model_name}"
+        self._model_name = model_name
+        self._device = device
+        self._allow_download = allow_download
+        self._impl: Any = None
+        self._lock = asyncio.Lock()
 
-        # Score documents in batches
-        scored_docs = await self._score_documents_batch(query, docs_to_rerank)
+    async def _load(self) -> Any:
+        if self._impl is not None:
+            return self._impl
+        async with self._lock:
+            if self._impl is None:
+                if not self._allow_download:
+                    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+                    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+                try:
+                    from app.reranking.cross_encoder import CrossEncoderConfig, CrossEncoderReranker
+                except ImportError as exc:
+                    raise RerankError(
+                        "cross_encoder mode needs the optional ML dependencies "
+                        "(pip install -r requirements-ml.txt)"
+                    ) from exc
+                config = CrossEncoderConfig(model_name=self._model_name, device=self._device)
 
-        # Sort by score
-        scored_docs.sort(key=lambda x: x[1], reverse=True)
+                def construct() -> Any:
+                    return CrossEncoderReranker(config)
 
-        # Return top-k with scores
-        results = []
-        for doc, score in scored_docs[:top_k]:
-            doc_copy = doc.copy()
-            doc_copy["rerank_score"] = score
-            results.append(doc_copy)
+                try:
+                    self._impl = await asyncio.to_thread(construct)
+                except Exception as exc:
+                    raise RerankError(
+                        f"Could not load cross-encoder '{self._model_name}': {exc}. "
+                        "Prepare it with `python scripts/setup/init_models.py --reranker`."
+                    ) from exc
+        return self._impl
 
-        logger.info(
-            f"Reranked {len(docs_to_rerank)} documents, returning top {len(results)}"
+    async def score(self, query: str, hits: Sequence[SearchHit]) -> List[float]:
+        impl = await self._load()
+        docs = [{"id": h.chunk_id, "content": h.text, "score": 0.0} for h in hits]
+        results = await asyncio.to_thread(impl.rerank, query, docs, None)
+        by_id = {r.doc_id: float(r.rerank_score) for r in results}
+        return [by_id[h.chunk_id] for h in hits]
+
+
+def build_reranker(settings: Settings, chat_client=None) -> Optional[Reranker]:
+    mode = settings.reranker_mode
+    if mode == "none":
+        return None
+    if mode == "heuristic":
+        return HeuristicReranker()
+    if mode == "llm":
+        if chat_client is None:
+            logger.warning("reranker_mode=llm but no generation provider; reranking unavailable")
+            return None
+        return LLMReranker(
+            chat_client,
+            settings.openai_model,
+            settings.llm_rerank_max_candidates,
+            settings.llm_rerank_concurrency,
         )
-        return results
-
-    async def _score_documents_batch(
-        self, query: str, documents: List[Dict[str, Any]]
-    ) -> List[Tuple[Dict[str, Any], float]]:
-        """Score documents in batches with rate limiting"""
-        semaphore = asyncio.Semaphore(self.max_concurrent)
-
-        async def score_doc(doc):
-            async with semaphore:
-                score = await self._score_single_document(query, doc)
-                return (doc, score)
-
-        tasks = [score_doc(doc) for doc in documents]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Filter out any failed scorings
-        scored_docs = []
-        for result in results:
-            if isinstance(result, tuple) and len(result) == 2:
-                scored_docs.append(result)
-            else:
-                logger.warning(f"Failed to score document: {result}")
-
-        return scored_docs
-
-    async def _score_single_document(
-        self, query: str, document: Dict[str, Any]
-    ) -> float:
-        """Score a single document's relevance to the query"""
-        try:
-            content = document.get("content", "")
-            if not content:
-                return 0.0
-
-            # Truncate content if too long
-            max_content_length = 500
-            if len(content) > max_content_length:
-                content = content[:max_content_length] + "..."
-
-            prompt = f"""Given the following query and document, rate the relevance of the document to the query on a scale from 0 to 10.
-Only respond with a number between 0 and 10.
-
-Query: {query}
-
-Document:
-{content}
-
-Relevance score (0-10):"""
-
-            response = await self.llm.ainvoke(prompt)
-
-            # Extract score from response
-            try:
-                score_text = response.content.strip()
-                # Handle various formats like "8", "8/10", "8.5", etc.
-                score_text = score_text.split("/")[0].strip()
-                score = float(score_text)
-                # Normalize to 0-1 range
-                return min(max(score / 10.0, 0.0), 1.0)
-            except (ValueError, AttributeError):
-                logger.warning(
-                    f"Could not parse score from response: {response.content}"
-                )
-                return 0.5  # Default middle score
-
-        except Exception as e:
-            logger.error(f"Error scoring document: {e}")
-            return 0.0
-
-    async def rerank_with_feedback(
-        self,
-        query: str,
-        documents: List[Dict[str, Any]],
-        top_k: int = 5,
-        user_feedback: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        Rerank with optional user feedback to improve results.
-
-        Args:
-            query: The search query
-            documents: List of documents to rerank
-            top_k: Number of top documents to return
-            user_feedback: Optional feedback on previous results
-
-        Returns:
-            List of reranked documents
-        """
-        # If we have feedback, adjust scoring
-        if user_feedback:
-            # This could be extended to use feedback for learning
-            logger.info("Reranking with user feedback")
-            # For now, just log it
-
-        return await self.rerank(query, documents, top_k)
+    if mode == "cross_encoder":
+        return CrossEncoderAdapter(
+            settings.cross_encoder_model,
+            settings.cross_encoder_device,
+            settings.allow_model_download,
+        )
+    raise ValueError(f"Unknown reranker mode: {mode}")
 
 
-class SimpleReranker:
-    """
-    A simple, fast reranker based on keyword matching and heuristics.
-    Useful when LLM-based reranking is too slow or expensive.
-    """
+@dataclass
+class RerankOutcome:
+    hits: List[SearchHit]
+    status: RerankStatus
+    reranker: Optional[str]
+    error: Optional[str] = None
 
-    def rerank(
-        self, query: str, documents: List[Dict[str, Any]], top_k: int = 5
-    ) -> List[Dict[str, Any]]:
-        """
-        Rerank documents using simple heuristics.
 
-        Args:
-            query: The search query
-            documents: List of documents to rerank
-            top_k: Number of top documents to return
-
-        Returns:
-            List of reranked documents
-        """
-        if not documents:
-            return []
-
-        query_terms = set(query.lower().split())
-
-        scored_docs = []
-        for doc in documents:
-            content = doc.get("content", "").lower()
-
-            # Score based on:
-            # 1. Exact query match
-            # 2. Individual term matches
-            # 3. Term proximity
-            # 4. Original relevance score
-
-            score = 0.0
-
-            # Exact match bonus
-            if query.lower() in content:
-                score += 2.0
-
-            # Term frequency
-            term_matches = sum(1 for term in query_terms if term in content)
-            score += term_matches * 0.5
-
-            # Consider original relevance score if available
-            if "relevance_score" in doc:
-                score += doc["relevance_score"] * 0.5
-
-            scored_docs.append((doc, score))
-
-        # Sort by score
-        scored_docs.sort(key=lambda x: x[1], reverse=True)
-
-        # Return top-k
-        results = []
-        for doc, score in scored_docs[:top_k]:
-            doc_copy = doc.copy()
-            doc_copy["rerank_score"] = score
-            results.append(doc_copy)
-
-        return results
+async def apply_reranker(
+    reranker: Optional[Reranker], query: str, hits: Sequence[SearchHit]
+) -> RerankOutcome:
+    """Rerank the full candidate pool; never drop candidates on failure."""
+    hits = list(hits)
+    if reranker is None:
+        return RerankOutcome(hits, RerankStatus.UNAVAILABLE, None)
+    if not hits:
+        return RerankOutcome(hits, RerankStatus.APPLIED, reranker.name)
+    try:
+        scores = await reranker.score(query, hits)
+        if len(scores) != len(hits):
+            raise RerankError("reranker returned a different number of scores")
+    except Exception as exc:
+        logger.warning("Reranking failed (%s); keeping original order", exc)
+        return RerankOutcome(hits, RerankStatus.FAILED, reranker.name, str(exc))
+    for hit, score in zip(hits, scores):
+        hit.rerank_score = float(score)
+    ordered = sorted(hits, key=lambda h: (-(h.rerank_score or 0.0), h.chunk_id))
+    return RerankOutcome(ordered, RerankStatus.APPLIED, reranker.name)

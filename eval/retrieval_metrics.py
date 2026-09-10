@@ -1,390 +1,298 @@
-from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass, asdict
-import numpy as np
-from collections import defaultdict
+"""Retrieval metrics with explicit conventions.
+
+Evaluation unit: the *document* (a stable corpus identifier such as the sample
+filename). A retriever returns chunks; ``dedupe_to_documents`` keeps the first
+occurrence of each document so repeated chunks of one document cannot inflate
+recall or count as several hits.
+
+Conventions (state them when you compare numbers across systems):
+- precision@k divides by k, even when fewer than k results were returned.
+- recall@k divides by the number of judged-relevant documents. Queries with no
+  relevant document are *unanswerable*; their recall/AP/RR are ``None`` and
+  they are summarized separately (``abstention``), never as 0/0.
+- MRR uses the first relevant document within the cutoff ``k``; 0 if none.
+- nDCG uses gain ``2**rel - 1`` and discount ``log2(rank + 1)``. Gains come
+  from the independent relevance judgments (qrels), never from retrieval
+  scores. The ideal DCG is computed from the *full* judged set, including
+  relevant documents the retriever missed. Unjudged documents have gain 0.
+- Comparisons align by query id, never by list position. A relative change
+  from a zero baseline is undefined and reported as ``None``.
+"""
+
+from __future__ import annotations
+
 import json
-import logging
-from datetime import datetime
-from pathlib import Path
+import math
+import statistics
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-logger = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class Qrels:
+    """Graded judgments: ``judgments[query_id][doc_id] = grade`` (grade >= 1 is relevant)."""
+
+    judgments: Mapping[str, Mapping[str, int]]
+
+    def relevant(self, query_id: str) -> Dict[str, int]:
+        return {d: int(g) for d, g in self.judgments.get(query_id, {}).items() if int(g) > 0}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Mapping[str, int]]) -> "Qrels":
+        return cls({q: dict(v) for q, v in data.items()})
 
 
 @dataclass
-class RetrievalResult:
+class RankedList:
     query_id: str
-    retrieved_docs: List[str]
-    relevance_scores: List[float]
-    ground_truth: List[str]
-    metadata: Dict[str, Any] = None
+    doc_ids: List[str]
+    error: Optional[str] = None
+    duplicates_removed: int = 0
+
+
+def dedupe_to_documents(doc_ids_in_rank_order: Iterable[str]) -> RankedList:
+    seen: List[str] = []
+    dupes = 0
+    for doc_id in doc_ids_in_rank_order:
+        if doc_id in seen:
+            dupes += 1
+            continue
+        seen.append(doc_id)
+    return RankedList(query_id="", doc_ids=seen, duplicates_removed=dupes)
+
+
+# -- per-query metrics ----------------------------------------------------------
+
+
+def precision_at_k(ranked: Sequence[str], relevant: Mapping[str, int], k: int) -> float:
+    if k <= 0:
+        raise ValueError("k must be positive")
+    top = list(dict.fromkeys(ranked))[:k]
+    return sum(1 for d in top if d in relevant) / k
+
+
+def recall_at_k(ranked: Sequence[str], relevant: Mapping[str, int], k: int) -> Optional[float]:
+    if k <= 0:
+        raise ValueError("k must be positive")
+    if not relevant:
+        return None
+    top = list(dict.fromkeys(ranked))[:k]
+    return sum(1 for d in top if d in relevant) / len(relevant)
+
+
+def reciprocal_rank(ranked: Sequence[str], relevant: Mapping[str, int], k: int) -> Optional[float]:
+    if not relevant:
+        return None
+    for rank, doc in enumerate(list(dict.fromkeys(ranked))[:k], start=1):
+        if doc in relevant:
+            return 1.0 / rank
+    return 0.0
+
+
+def average_precision(
+    ranked: Sequence[str], relevant: Mapping[str, int], k: Optional[int] = None
+) -> Optional[float]:
+    if not relevant:
+        return None
+    unique = list(dict.fromkeys(ranked))
+    if k is not None:
+        unique = unique[:k]
+    hits = 0
+    total = 0.0
+    for rank, doc in enumerate(unique, start=1):
+        if doc in relevant:
+            hits += 1
+            total += hits / rank
+    return total / len(relevant)
+
+
+def dcg(gains: Sequence[float]) -> float:
+    return sum((2.0**g - 1.0) / math.log2(i + 1) for i, g in enumerate(gains, start=1))
+
+
+def ndcg_at_k(ranked: Sequence[str], graded: Mapping[str, int], k: int) -> Optional[float]:
+    """nDCG@k from judgments; ideal ranking uses every judged-relevant document."""
+    if k <= 0:
+        raise ValueError("k must be positive")
+    relevant = {d: int(g) for d, g in graded.items() if int(g) > 0}
+    if not relevant:
+        return None
+    unique = list(dict.fromkeys(ranked))[:k]
+    actual = dcg([float(relevant.get(d, 0)) for d in unique])
+    ideal = dcg(sorted((float(g) for g in relevant.values()), reverse=True)[:k])
+    return actual / ideal if ideal > 0 else None
+
+
+def hit_at_k(ranked: Sequence[str], relevant: Mapping[str, int], k: int) -> Optional[float]:
+    if not relevant:
+        return None
+    return 1.0 if any(d in relevant for d in list(dict.fromkeys(ranked))[:k]) else 0.0
+
+
+# -- run-level evaluation --------------------------------------------------------
 
 
 @dataclass
-class MetricsReport:
-    timestamp: datetime
-    dataset_name: str
-    num_queries: int
-    metrics: Dict[str, float]
-    per_query_metrics: List[Dict[str, Any]]
-    config: Dict[str, Any]
+class QueryReport:
+    query_id: str
+    status: str  # evaluated | unanswerable | error | missing
+    num_retrieved: int
+    num_relevant: int
+    duplicates_removed: int
+    retrieved: List[str]
+    relevant: List[str]
+    metrics: Dict[str, Optional[float]] = field(default_factory=dict)
+    retrieved_any: Optional[bool] = None  # for unanswerable queries: did we return anything?
+    error: Optional[str] = None
 
 
-class RetrievalMetrics:
-    def __init__(self):
-        self.results: List[RetrievalResult] = []
-        self.metrics_history: List[MetricsReport] = []
-    
-    def add_result(self, result: RetrievalResult):
-        self.results.append(result)
-    
-    def precision_at_k(self, retrieved: List[str], relevant: List[str], k: int) -> float:
-        if k <= 0:
-            return 0.0
-        
-        retrieved_k = retrieved[:k]
-        relevant_set = set(relevant)
-        
-        num_relevant_retrieved = sum(1 for doc in retrieved_k if doc in relevant_set)
-        
-        return num_relevant_retrieved / k if k > 0 else 0.0
-    
-    def recall_at_k(self, retrieved: List[str], relevant: List[str], k: int) -> float:
-        if not relevant or k <= 0:
-            return 0.0
-        
-        retrieved_k = retrieved[:k]
-        relevant_set = set(relevant)
-        
-        num_relevant_retrieved = sum(1 for doc in retrieved_k if doc in relevant_set)
-        
-        return num_relevant_retrieved / len(relevant)
-    
-    def f1_at_k(self, retrieved: List[str], relevant: List[str], k: int) -> float:
-        precision = self.precision_at_k(retrieved, relevant, k)
-        recall = self.recall_at_k(retrieved, relevant, k)
-        
-        if precision + recall == 0:
-            return 0.0
-        
-        return 2 * (precision * recall) / (precision + recall)
-    
-    def average_precision(self, retrieved: List[str], relevant: List[str]) -> float:
-        if not relevant:
-            return 0.0
-        
-        relevant_set = set(relevant)
-        num_relevant = 0
-        sum_precision = 0.0
-        
-        for i, doc in enumerate(retrieved, 1):
-            if doc in relevant_set:
-                num_relevant += 1
-                precision_at_i = num_relevant / i
-                sum_precision += precision_at_i
-        
-        return sum_precision / len(relevant) if relevant else 0.0
-    
-    def mean_average_precision(self, results: List[RetrievalResult] = None) -> float:
-        if results is None:
-            results = self.results
-        
-        if not results:
-            return 0.0
-        
-        ap_scores = [
-            self.average_precision(r.retrieved_docs, r.ground_truth)
-            for r in results
-        ]
-        
-        return np.mean(ap_scores)
-    
-    def reciprocal_rank(self, retrieved: List[str], relevant: List[str]) -> float:
-        relevant_set = set(relevant)
-        
-        for i, doc in enumerate(retrieved, 1):
-            if doc in relevant_set:
-                return 1.0 / i
-        
-        return 0.0
-    
-    def mean_reciprocal_rank(self, results: List[RetrievalResult] = None) -> float:
-        if results is None:
-            results = self.results
-        
-        if not results:
-            return 0.0
-        
-        rr_scores = [
-            self.reciprocal_rank(r.retrieved_docs, r.ground_truth)
-            for r in results
-        ]
-        
-        return np.mean(rr_scores)
-    
-    def dcg_at_k(self, relevance_scores: List[float], k: int) -> float:
-        if k <= 0:
-            return 0.0
-        
-        relevance_k = relevance_scores[:k]
-        
-        dcg = 0.0
-        for i, rel in enumerate(relevance_k, 1):
-            dcg += (2**rel - 1) / np.log2(i + 1)
-        
-        return dcg
-    
-    def ndcg_at_k(
-        self,
-        retrieved: List[str],
-        relevant: List[str],
-        relevance_scores: List[float],
-        k: int
-    ) -> float:
-        if k <= 0 or not relevant:
-            return 0.0
-        
-        actual_dcg = self.dcg_at_k(relevance_scores, k)
-        
-        ideal_scores = sorted(relevance_scores, reverse=True)
-        ideal_dcg = self.dcg_at_k(ideal_scores, k)
-        
-        if ideal_dcg == 0:
-            return 0.0
-        
-        return actual_dcg / ideal_dcg
-    
-    def hit_rate_at_k(self, results: List[RetrievalResult], k: int) -> float:
-        if not results:
-            return 0.0
-        
-        hits = 0
-        for result in results:
-            retrieved_k = result.retrieved_docs[:k]
-            relevant_set = set(result.ground_truth)
-            
-            if any(doc in relevant_set for doc in retrieved_k):
-                hits += 1
-        
-        return hits / len(results)
-    
-    def success_at_k(self, results: List[RetrievalResult], k: int) -> float:
-        return self.hit_rate_at_k(results, k)
-    
-    def calculate_all_metrics(
-        self,
-        results: List[RetrievalResult] = None,
-        k_values: List[int] = None
-    ) -> Dict[str, Any]:
-        if results is None:
-            results = self.results
-        
-        if k_values is None:
-            k_values = [1, 3, 5, 10]
-        
-        if not results:
-            return {}
-        
-        metrics = {
-            "map": self.mean_average_precision(results),
-            "mrr": self.mean_reciprocal_rank(results)
-        }
-        
-        for k in k_values:
-            precision_scores = []
-            recall_scores = []
-            f1_scores = []
-            ndcg_scores = []
-            
-            for result in results:
-                precision_scores.append(
-                    self.precision_at_k(result.retrieved_docs, result.ground_truth, k)
-                )
-                recall_scores.append(
-                    self.recall_at_k(result.retrieved_docs, result.ground_truth, k)
-                )
-                f1_scores.append(
-                    self.f1_at_k(result.retrieved_docs, result.ground_truth, k)
-                )
-                
-                if result.relevance_scores:
-                    ndcg_scores.append(
-                        self.ndcg_at_k(
-                            result.retrieved_docs,
-                            result.ground_truth,
-                            result.relevance_scores,
-                            k
-                        )
-                    )
-            
-            metrics[f"precision@{k}"] = np.mean(precision_scores)
-            metrics[f"recall@{k}"] = np.mean(recall_scores)
-            metrics[f"f1@{k}"] = np.mean(f1_scores)
-            metrics[f"hit_rate@{k}"] = self.hit_rate_at_k(results, k)
-            
-            if ndcg_scores:
-                metrics[f"ndcg@{k}"] = np.mean(ndcg_scores)
-        
-        return metrics
-    
-    def calculate_per_query_metrics(
-        self,
-        results: List[RetrievalResult] = None,
-        k: int = 10
-    ) -> List[Dict[str, Any]]:
-        if results is None:
-            results = self.results
-        
-        per_query = []
-        
-        for result in results:
-            query_metrics = {
-                "query_id": result.query_id,
-                "num_retrieved": len(result.retrieved_docs),
-                "num_relevant": len(result.ground_truth),
-                "precision": self.precision_at_k(
-                    result.retrieved_docs, result.ground_truth, k
-                ),
-                "recall": self.recall_at_k(
-                    result.retrieved_docs, result.ground_truth, k
-                ),
-                "f1": self.f1_at_k(
-                    result.retrieved_docs, result.ground_truth, k
-                ),
-                "ap": self.average_precision(
-                    result.retrieved_docs, result.ground_truth
-                ),
-                "rr": self.reciprocal_rank(
-                    result.retrieved_docs, result.ground_truth
-                )
-            }
-            
-            if result.relevance_scores:
-                query_metrics["ndcg"] = self.ndcg_at_k(
-                    result.retrieved_docs,
-                    result.ground_truth,
-                    result.relevance_scores,
-                    k
-                )
-            
-            if result.metadata:
-                query_metrics["metadata"] = result.metadata
-            
-            per_query.append(query_metrics)
-        
-        return per_query
-    
-    def generate_report(
-        self,
-        dataset_name: str,
-        config: Dict[str, Any] = None,
-        save_path: Optional[str] = None
-    ) -> MetricsReport:
-        metrics = self.calculate_all_metrics()
-        per_query = self.calculate_per_query_metrics()
-        
-        report = MetricsReport(
-            timestamp=datetime.now(),
-            dataset_name=dataset_name,
-            num_queries=len(self.results),
-            metrics=metrics,
-            per_query_metrics=per_query,
-            config=config or {}
-        )
-        
-        self.metrics_history.append(report)
-        
-        if save_path:
-            self.save_report(report, save_path)
-        
-        return report
-    
-    def save_report(self, report: MetricsReport, save_path: str):
-        path = Path(save_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        
-        report_dict = asdict(report)
-        report_dict["timestamp"] = report.timestamp.isoformat()
-        
-        with open(path, "w") as f:
-            json.dump(report_dict, f, indent=2)
-        
-        logger.info(f"Saved metrics report to {save_path}")
-    
-    def compare_systems(
-        self,
-        baseline_results: List[RetrievalResult],
-        improved_results: List[RetrievalResult],
-        k_values: List[int] = None
-    ) -> Dict[str, Any]:
-        if k_values is None:
-            k_values = [1, 3, 5, 10]
-        
-        baseline_metrics = self.calculate_all_metrics(baseline_results, k_values)
-        improved_metrics = self.calculate_all_metrics(improved_results, k_values)
-        
-        comparison = {
-            "baseline": baseline_metrics,
-            "improved": improved_metrics,
-            "improvements": {}
-        }
-        
-        for metric_name in baseline_metrics:
-            baseline_val = baseline_metrics[metric_name]
-            improved_val = improved_metrics[metric_name]
-            
-            if baseline_val > 0:
-                improvement_pct = ((improved_val - baseline_val) / baseline_val) * 100
-            else:
-                improvement_pct = 100 if improved_val > 0 else 0
-            
-            comparison["improvements"][metric_name] = {
-                "absolute": improved_val - baseline_val,
-                "relative_pct": improvement_pct
-            }
-        
-        return comparison
-    
-    def statistical_significance_test(
-        self,
-        results1: List[RetrievalResult],
-        results2: List[RetrievalResult],
-        metric: str = "map",
-        num_bootstrap: int = 1000
-    ) -> Dict[str, Any]:
-        from scipy import stats
-        
-        scores1 = []
-        scores2 = []
-        
-        for r1, r2 in zip(results1, results2):
-            if metric == "map" or metric == "ap":
-                scores1.append(self.average_precision(r1.retrieved_docs, r1.ground_truth))
-                scores2.append(self.average_precision(r2.retrieved_docs, r2.ground_truth))
-            elif metric == "mrr" or metric == "rr":
-                scores1.append(self.reciprocal_rank(r1.retrieved_docs, r1.ground_truth))
-                scores2.append(self.reciprocal_rank(r2.retrieved_docs, r2.ground_truth))
-            elif metric.startswith("precision@"):
-                k = int(metric.split("@")[1])
-                scores1.append(self.precision_at_k(r1.retrieved_docs, r1.ground_truth, k))
-                scores2.append(self.precision_at_k(r2.retrieved_docs, r2.ground_truth, k))
-            elif metric.startswith("recall@"):
-                k = int(metric.split("@")[1])
-                scores1.append(self.recall_at_k(r1.retrieved_docs, r1.ground_truth, k))
-                scores2.append(self.recall_at_k(r2.retrieved_docs, r2.ground_truth, k))
-        
-        t_stat, p_value = stats.ttest_rel(scores1, scores2)
-        
-        mean_diff = np.mean(scores2) - np.mean(scores1)
-        std_diff = np.std(np.array(scores2) - np.array(scores1))
-        
+@dataclass
+class RunReport:
+    ks: List[int]
+    queries: List[QueryReport]
+    summary: Dict[str, Any]
+
+    def to_dict(self) -> Dict[str, Any]:
         return {
-            "metric": metric,
-            "mean_system1": np.mean(scores1),
-            "mean_system2": np.mean(scores2),
-            "mean_difference": mean_diff,
-            "std_difference": std_diff,
-            "t_statistic": t_stat,
-            "p_value": p_value,
-            "significant_at_0.05": p_value < 0.05,
-            "significant_at_0.01": p_value < 0.01
+            "ks": self.ks,
+            "queries": [asdict(q) for q in self.queries],
+            "summary": self.summary,
         }
+
+
+def evaluate_run(
+    run: Mapping[str, RankedList], qrels: Qrels, ks: Sequence[int] = (1, 3, 5, 10)
+) -> RunReport:
+    """Evaluate ``run`` against ``qrels``. Every judged query is reported, including
+    missing and failed ones; summary means state their denominators."""
+    ks = sorted(set(int(k) for k in ks))
+    reports: List[QueryReport] = []
+    for query_id in sorted(qrels.judgments):
+        relevant = qrels.relevant(query_id)
+        ranked = run.get(query_id)
+        if ranked is None:
+            reports.append(
+                QueryReport(
+                    query_id,
+                    "missing",
+                    0,
+                    len(relevant),
+                    0,
+                    [],
+                    sorted(relevant),
+                    error="no result for query",
+                )
+            )
+            continue
+        if ranked.error:
+            reports.append(
+                QueryReport(
+                    query_id, "error", 0, len(relevant), 0, [], sorted(relevant), error=ranked.error
+                )
+            )
+            continue
+        docs = list(dict.fromkeys(ranked.doc_ids))
+        dupes = ranked.duplicates_removed + (len(ranked.doc_ids) - len(docs))
+        if not relevant:
+            reports.append(
+                QueryReport(
+                    query_id,
+                    "unanswerable",
+                    len(docs),
+                    0,
+                    dupes,
+                    docs,
+                    [],
+                    retrieved_any=bool(docs),
+                )
+            )
+            continue
+        metrics: Dict[str, Optional[float]] = {}
+        for k in ks:
+            metrics[f"precision@{k}"] = precision_at_k(docs, relevant, k)
+            metrics[f"recall@{k}"] = recall_at_k(docs, relevant, k)
+            metrics[f"ndcg@{k}"] = ndcg_at_k(docs, qrels.judgments[query_id], k)
+            metrics[f"hit@{k}"] = hit_at_k(docs, relevant, k)
+        metrics[f"rr@{max(ks)}"] = reciprocal_rank(docs, relevant, max(ks))
+        metrics["ap"] = average_precision(docs, relevant)
+        reports.append(
+            QueryReport(
+                query_id,
+                "evaluated",
+                len(docs),
+                len(relevant),
+                dupes,
+                docs,
+                sorted(relevant),
+                metrics,
+            )
+        )
+
+    evaluated = [r for r in reports if r.status == "evaluated"]
+    unanswerable = [r for r in reports if r.status == "unanswerable"]
+    summary: Dict[str, Any] = {
+        "n_queries": len(reports),
+        "n_evaluated": len(evaluated),
+        "n_unanswerable": len(unanswerable),
+        "n_errors": sum(1 for r in reports if r.status == "error"),
+        "n_missing": sum(1 for r in reports if r.status == "missing"),
+        "means": {},
+        "abstention": {
+            "n": len(unanswerable),
+            "returned_results_for": sum(1 for r in unanswerable if r.retrieved_any),
+            "note": "retrieval always returns candidates; abstention is decided at answer time",
+        },
+        "conventions": "see eval/retrieval_metrics.py docstring",
+    }
+    if evaluated:
+        names = list(evaluated[0].metrics)
+        for name in names:
+            values = [r.metrics[name] for r in evaluated if r.metrics.get(name) is not None]
+            summary["means"][name] = {
+                "value": (sum(values) / len(values)) if values else None,
+                "n": len(values),
+            }
+    return RunReport(ks, reports, summary)
+
+
+def compare_runs(baseline: RunReport, candidate: RunReport, metric: str) -> Dict[str, Any]:
+    """Paired comparison aligned by query id. Small suites give noisy deltas."""
+    base = {q.query_id: q for q in baseline.queries if q.status == "evaluated"}
+    cand = {q.query_id: q for q in candidate.queries if q.status == "evaluated"}
+    shared = sorted(set(base) & set(cand))
+    diffs: List[float] = []
+    per_query: Dict[str, Dict[str, Optional[float]]] = {}
+    for qid in shared:
+        b = base[qid].metrics.get(metric)
+        c = cand[qid].metrics.get(metric)
+        if b is None or c is None:
+            continue
+        diffs.append(c - b)
+        per_query[qid] = {"baseline": b, "candidate": c, "delta": c - b}
+    mean_base = statistics.fmean([v["baseline"] for v in per_query.values()]) if per_query else None
+    mean_cand = (
+        statistics.fmean([v["candidate"] for v in per_query.values()]) if per_query else None
+    )
+    absolute = (mean_cand - mean_base) if per_query else None
+    relative = None
+    if absolute is not None and mean_base not in (None, 0.0):
+        relative = absolute / mean_base
+    return {
+        "metric": metric,
+        "n_paired": len(diffs),
+        "n_unpaired": len(set(base) ^ set(cand)),
+        "baseline_mean": mean_base,
+        "candidate_mean": mean_cand,
+        "absolute_delta": absolute,
+        "relative_delta": relative,  # None when the baseline mean is 0 (undefined)
+        "wins": sum(1 for d in diffs if d > 0),
+        "losses": sum(1 for d in diffs if d < 0),
+        "ties": sum(1 for d in diffs if d == 0),
+        "per_query": per_query,
+        "note": "paired by query id; no significance claim is made for small suites",
+    }
+
+
+def load_qrels(path: str) -> Qrels:
+    with open(path, "r", encoding="utf-8") as handle:
+        return Qrels.from_dict(json.load(handle))

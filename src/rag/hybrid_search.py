@@ -1,175 +1,84 @@
-from typing import List, Dict, Any, Optional
-import numpy as np
-from rank_bm25 import BM25Okapi
-from ..core.vector_store import VectorStore
-from ..core.config import settings
-import logging
+"""Reciprocal rank fusion of dense and lexical candidate lists.
 
-logger = logging.getLogger(__name__)
+Identity is the chunk ID, never the text: identical passages in different
+documents remain distinct. A branch with zero weight contributes nothing (its
+candidates are not injected with a zero score). Ties are broken by chunk ID so
+results are deterministic.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence
+
+from ..core.lexical import LexicalHit
+from ..core.vector_store import VectorHit
 
 
-class HybridSearch:
-    """Implements hybrid search combining vector and keyword search"""
+@dataclass(frozen=True)
+class FusionConfig:
+    rrf_k: int = 60
+    vector_weight: float = 0.5
+    lexical_weight: float = 0.5
 
-    def __init__(self, vector_store: VectorStore):
-        self.vector_store = vector_store
-        self.bm25_index = None
-        self.documents = []
-        self.tokenized_docs = []
+    def __post_init__(self) -> None:
+        if self.rrf_k <= 0:
+            raise ValueError("rrf_k must be positive")
+        for w in (self.vector_weight, self.lexical_weight):
+            if w < 0.0 or w > 1.0:
+                raise ValueError("fusion weights must be within [0, 1]")
+        if self.vector_weight == 0.0 and self.lexical_weight == 0.0:
+            raise ValueError("at least one fusion weight must be positive")
 
-    def add_documents(self, documents: List[Dict[str, Any]]):
-        """Add documents to both vector and BM25 indices"""
-        # Extract data for vector store
-        texts = [doc["content"] for doc in documents]
-        metadatas = [doc["metadata"] for doc in documents]
-        ids = [doc["chunk_id"] for doc in documents]
+    @classmethod
+    def from_alpha(cls, alpha: float, rrf_k: int = 60) -> "FusionConfig":
+        """``alpha`` is the dense weight; the lexical weight is ``1 - alpha``."""
+        return cls(rrf_k=rrf_k, vector_weight=alpha, lexical_weight=1.0 - alpha)
 
-        # Add to vector store
-        self.vector_store.add_documents(documents=texts, metadatas=metadatas, ids=ids)
 
-        # Build BM25 index
-        self.documents.extend(documents)
-        tokenized_docs = [self._tokenize(doc["content"]) for doc in documents]
-        self.tokenized_docs.extend(tokenized_docs)
+@dataclass
+class FusedCandidate:
+    chunk_id: str
+    fusion_score: Optional[float]
+    vector_rank: Optional[int] = None
+    vector_distance: Optional[float] = None
+    lexical_rank: Optional[int] = None
+    lexical_score: Optional[float] = None
 
-        # Rebuild BM25 index with all documents
-        if self.tokenized_docs:
-            self.bm25_index = BM25Okapi(self.tokenized_docs)
-            logger.info(f"BM25 index rebuilt with {len(self.tokenized_docs)} documents")
 
-    def _tokenize(self, text: str) -> List[str]:
-        """Simple tokenization for BM25"""
-        # Convert to lowercase and split on whitespace and punctuation
-        import re
+def reciprocal_rank_fusion(
+    vector_hits: Sequence[VectorHit],
+    lexical_hits: Sequence[LexicalHit],
+    config: FusionConfig,
+) -> List[FusedCandidate]:
+    """Fuse two ranked lists with RRF: sum(weight / (k + rank))."""
+    merged: Dict[str, FusedCandidate] = {}
 
-        tokens = re.findall(r"\b\w+\b", text.lower())
-        return tokens
+    if config.vector_weight > 0.0:
+        for rank, hit in enumerate(vector_hits, start=1):
+            cand = merged.get(hit.chunk_id)
+            if cand is None:
+                cand = FusedCandidate(chunk_id=hit.chunk_id, fusion_score=0.0)
+                merged[hit.chunk_id] = cand
+            if cand.vector_rank is None:  # ignore duplicate IDs within a branch
+                cand.vector_rank = rank
+                cand.vector_distance = hit.distance
+                cand.fusion_score = (cand.fusion_score or 0.0) + config.vector_weight / (
+                    config.rrf_k + rank
+                )
 
-    async def search(
-        self,
-        query: str,
-        k: int = 10,
-        alpha: float = 0.5,
-        filters: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        Hybrid search combining vector and BM25.
+    if config.lexical_weight > 0.0:
+        for rank, lhit in enumerate(lexical_hits, start=1):
+            cand = merged.get(lhit.chunk_id)
+            if cand is None:
+                cand = FusedCandidate(chunk_id=lhit.chunk_id, fusion_score=0.0)
+                merged[lhit.chunk_id] = cand
+            if cand.lexical_rank is None:
+                cand.lexical_rank = rank
+                cand.lexical_score = lhit.score
+                cand.fusion_score = (cand.fusion_score or 0.0) + config.lexical_weight / (
+                    config.rrf_k + rank
+                )
 
-        Args:
-            query: Search query
-            k: Number of results to return
-            alpha: Weight for vector search (1-alpha for BM25)
-            filters: Optional filters for vector search
-
-        Returns:
-            List of search results with combined scores
-        """
-        if not self.documents:
-            logger.warning("No documents in index")
-            return []
-
-        # Get more results than needed for better fusion
-        search_k = min(k * 3, len(self.documents))
-
-        # Vector search
-        vector_results = await self.vector_store.search(
-            query=query, k=search_k, filters=filters
-        )
-
-        # BM25 search
-        bm25_results = []
-        if self.bm25_index:
-            tokenized_query = self._tokenize(query)
-            bm25_scores = self.bm25_index.get_scores(tokenized_query)
-
-            # Get top-k BM25 results
-            top_indices = np.argsort(bm25_scores)[::-1][:search_k]
-
-            for idx in top_indices:
-                if idx < len(self.documents) and bm25_scores[idx] > 0:
-                    doc = self.documents[idx].copy()
-                    doc["bm25_score"] = float(bm25_scores[idx])
-                    bm25_results.append(doc)
-
-        # Combine results using Reciprocal Rank Fusion
-        combined_results = self._reciprocal_rank_fusion(
-            vector_results, bm25_results, alpha, k
-        )
-
-        return combined_results
-
-    def _reciprocal_rank_fusion(
-        self,
-        vector_results: List[Dict[str, Any]],
-        bm25_results: List[Dict[str, Any]],
-        alpha: float,
-        k: int,
-    ) -> List[Dict[str, Any]]:
-        """
-        Combine results using Reciprocal Rank Fusion (RRF).
-
-        RRF score = Σ(1 / (k + rank_i)) where k is a constant (typically 60)
-        """
-        rrf_k = 60  # Standard RRF constant
-
-        # Create score dictionaries
-        doc_scores = {}
-
-        # Process vector search results
-        for rank, result in enumerate(vector_results):
-            # Use content as key for matching
-            doc_key = result.get("content", "")
-            if doc_key:
-                score = alpha * (1.0 / (rrf_k + rank + 1))
-                if doc_key not in doc_scores:
-                    doc_scores[doc_key] = {
-                        "doc": result,
-                        "score": 0.0,
-                        "vector_rank": rank + 1,
-                        "vector_score": result.get("relevance_score", 0.0),
-                    }
-                doc_scores[doc_key]["score"] += score
-
-        # Process BM25 results
-        for rank, result in enumerate(bm25_results):
-            doc_key = result.get("content", "")
-            if doc_key:
-                score = (1 - alpha) * (1.0 / (rrf_k + rank + 1))
-                if doc_key not in doc_scores:
-                    doc_scores[doc_key] = {
-                        "doc": result,
-                        "score": 0.0,
-                        "bm25_rank": rank + 1,
-                        "bm25_score": result.get("bm25_score", 0.0),
-                    }
-                else:
-                    doc_scores[doc_key]["bm25_rank"] = rank + 1
-                    doc_scores[doc_key]["bm25_score"] = result.get("bm25_score", 0.0)
-                doc_scores[doc_key]["score"] += score
-
-        # Sort by combined score
-        sorted_docs = sorted(
-            doc_scores.values(), key=lambda x: x["score"], reverse=True
-        )[:k]
-
-        # Prepare final results
-        results = []
-        for item in sorted_docs:
-            result = item["doc"].copy()
-            result["hybrid_score"] = item["score"]
-            result["vector_rank"] = item.get("vector_rank", -1)
-            result["bm25_rank"] = item.get("bm25_rank", -1)
-            if "vector_score" in item:
-                result["vector_score"] = item["vector_score"]
-            if "bm25_score" in item:
-                result["bm25_score"] = item["bm25_score"]
-            results.append(result)
-
-        return results
-
-    def clear(self):
-        """Clear all indices"""
-        self.bm25_index = None
-        self.documents = []
-        self.tokenized_docs = []
-        logger.info("Hybrid search indices cleared")
+    ordered = sorted(merged.values(), key=lambda c: (-(c.fusion_score or 0.0), c.chunk_id))
+    return ordered

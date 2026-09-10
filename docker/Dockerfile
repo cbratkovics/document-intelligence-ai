@@ -1,91 +1,42 @@
-# Multi-stage Dockerfile for Document Intelligence AI
-# Optimized to reduce image size and ensure no layer exceeds 500MB
+# Runtime image for the Document Intelligence RAG System.
+#
+#   docker build -f docker/Dockerfile --target runtime -t doc-intel .
+#   docker run --rm -p 8000:8000 -v doc-intel-data:/app/data doc-intel
+#
+# The runtime target installs the core requirements only (lexical retrieval,
+# PDF/text ingestion, API). It has no provider keys and downloads no models.
+# The optional "ml" target adds the OpenAI client and local-model libraries.
 
-# Stage 1: Runtime base (API-only mode)
-FROM python:3.11-slim as runtime-base
+FROM python:3.11-slim AS runtime
 
 WORKDIR /app
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    ANONYMIZED_TELEMETRY=False \
+    DATA_DIR=/app/data \
+    HF_HOME=/app/models
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy and install base requirements
 COPY requirements-base.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements-base.txt && \
-    rm -rf /root/.cache/pip
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements-base.txt
 
-# Copy application code
 COPY src/ /app/src/
+COPY eval/ /app/eval/
 COPY scripts/ /app/scripts/
 
-# Create directories
-RUN mkdir -p /app/data /app/logs /app/models
-
-# Set environment variables
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV MODEL_CACHE_DIR=/app/models
-
-# Create non-root user
-RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
-
+RUN useradd -m -u 1000 appuser \
+    && mkdir -p /app/data /app/models \
+    && chown -R appuser:appuser /app
 USER appuser
 
-# Expose port
 EXPOSE 8000
-
-# Default command
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+    CMD python /app/scripts/health_check.py || exit 1
 CMD ["python", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
-# Stage 2: ML Runtime (includes ML dependencies)
-FROM runtime-base as runtime-ml
-
+FROM runtime AS ml
 USER root
-
-# Install build dependencies temporarily
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy and install ML requirements in one layer
 COPY requirements-ml.txt .
-RUN pip install --no-cache-dir -r requirements-ml.txt && \
-    rm -rf /root/.cache/pip && \
-    find /usr/local -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
-    find /usr/local -type f -name "*.pyc" -delete 2>/dev/null || true
-
-# Clean up build dependencies
-RUN apt-get purge -y --auto-remove build-essential gcc g++ && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-USER appuser
-
-# Stage 3: Development image
-FROM runtime-ml as development
-
-USER root
-
-# Install development tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    git \
-    vim \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy and install dev requirements
-COPY requirements-dev.txt .
-RUN pip install --no-cache-dir -r requirements-dev.txt && \
-    rm -rf /root/.cache/pip
-
+RUN pip install --no-cache-dir -r requirements-ml.txt
 USER appuser

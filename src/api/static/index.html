@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Document Intelligence RAG System</title>
+<style>
+  :root { --bg:#f7f7f5; --fg:#1d1d1b; --muted:#5f5f5a; --line:#d9d9d4; --card:#ffffff; --accent:#2d5b8a; --warn:#8a5a2d; --bad:#8a2d2d; --ok:#2d6b3f; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ececea; --muted:#a3a39c; --line:#3a3a37; --card:#1f1f1d; --accent:#7fb0e0; --warn:#e0b07f; --bad:#e08a8a; --ok:#8fd0a0; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:8px 24px; align-items:baseline; }
+  header h1 { font-size:18px; margin:0; }
+  header .caps { color:var(--muted); font-size:13px; }
+  main { display:grid; grid-template-columns: 360px 1fr; gap:16px; padding:16px 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:14px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  label { display:block; margin:8px 0 4px; color:var(--muted); font-size:13px; }
+  input[type=text], textarea, select { width:100%; padding:7px 8px; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--fg); font:inherit; }
+  textarea { min-height:64px; resize:vertical; }
+  button { padding:7px 12px; border:1px solid var(--accent); border-radius:4px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.secondary { background:transparent; color:var(--accent); }
+  button.danger { background:transparent; color:var(--bad); border-color:var(--bad); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  ul.docs { list-style:none; margin:0; padding:0; max-height:320px; overflow:auto; }
+  ul.docs li { padding:8px; border-bottom:1px solid var(--line); display:flex; gap:8px; align-items:flex-start; }
+  ul.docs li:last-child { border-bottom:0; }
+  .meta { color:var(--muted); font-size:12px; }
+  .status { display:inline-block; padding:1px 6px; border-radius:3px; font-size:12px; border:1px solid var(--line); }
+  .status.ready { color:var(--ok); border-color:var(--ok); }
+  .status.failed, .status.provider_error { color:var(--bad); border-color:var(--bad); }
+  .status.unverified_citations, .status.insufficient_evidence, .status.excerpts_only, .status.indexing { color:var(--warn); border-color:var(--warn); }
+  .answer { white-space:pre-wrap; padding:10px; border:1px solid var(--line); border-radius:4px; background:var(--bg); }
+  .hit { border:1px solid var(--line); border-radius:4px; padding:10px; margin:8px 0; }
+  .hit.used { border-color:var(--accent); }
+  .hit pre { white-space:pre-wrap; margin:6px 0 0; font:13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .scores { color:var(--muted); font-size:12px; }
+  .notes { color:var(--warn); font-size:13px; }
+  .empty { color:var(--muted); font-style:italic; }
+  .error { color:var(--bad); }
+  details summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  a { color:var(--accent); }
+  .sr-only { position:absolute; left:-9999px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Document Intelligence RAG System</h1>
+  <span class="caps" id="caps" aria-live="polite">Loading capabilities…</span>
+  <span class="caps"><a href="/docs">API docs</a></span>
+</header>
+<main>
+  <section aria-labelledby="docs-h">
+    <h2 id="docs-h">Documents</h2>
+    <form id="upload-form" class="row">
+      <label for="file" class="sr-only">Choose a file</label>
+      <input id="file" type="file" accept=".txt,.md,.rst,.pdf" required>
+      <button type="submit" id="upload-btn">Upload and index</button>
+    </form>
+    <p class="meta">Supported: .txt, .md, .rst, .pdf (text layer). Identical bytes are deduplicated.</p>
+    <div id="upload-result" class="meta" aria-live="polite"></div>
+    <ul class="docs" id="doc-list" aria-label="Indexed documents"><li class="empty">Loading…</li></ul>
+    <details id="chunk-panel" hidden>
+      <summary>Chunks of selected document</summary>
+      <div id="chunk-view"></div>
+    </details>
+  </section>
+
+  <section aria-labelledby="ask-h">
+    <h2 id="ask-h">Search and ask</h2>
+    <form id="ask-form">
+      <label for="question">Question or search text</label>
+      <textarea id="question" required placeholder="e.g. How many days do customers have to request a refund?"></textarea>
+      <div class="row">
+        <div>
+          <label for="mode">Retrieval mode</label>
+          <select id="mode">
+            <option value="hybrid">hybrid (dense + lexical)</option>
+            <option value="lexical">lexical (BM25)</option>
+            <option value="vector">vector (dense)</option>
+          </select>
+        </div>
+        <div>
+          <label for="topk">Top k</label>
+          <input id="topk" type="text" inputmode="numeric" value="5" size="3" aria-describedby="topk-help">
+        </div>
+        <div>
+          <label for="rerank">Reranker</label>
+          <select id="rerank"><option value="false">off</option><option value="true">on (if configured)</option></select>
+        </div>
+        <div>
+          <label for="generate">Answer</label>
+          <select id="generate"><option value="true">generate (if provider configured)</option><option value="false">excerpts only</option></select>
+        </div>
+      </div>
+      <label>Scope: <span id="scope-label" class="meta">whole corpus</span> <button type="button" class="secondary" id="clear-scope" hidden>clear</button></label>
+      <div class="row" style="margin-top:8px">
+        <button type="submit" id="ask-btn">Run</button>
+        <span id="ask-status" class="meta" aria-live="polite"></span>
+      </div>
+    </form>
+
+    <h2 style="margin-top:16px">Answer</h2>
+    <div id="answer-status"></div>
+    <div id="answer" class="answer empty">No question asked yet.</div>
+    <div id="citations"></div>
+    <div id="notes" class="notes"></div>
+
+    <h2 style="margin-top:16px">Retrieved passages</h2>
+    <p class="meta">Scores are per stage and only comparable within one request. Highlighted passages entered the model context.</p>
+    <div id="hits"><p class="empty">Nothing retrieved yet.</p></div>
+  </section>
+</main>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const state = { scope: null, scopeName: null, apiKey: null };
+
+  async function api(path, options = {}) {
+    const headers = Object.assign({}, options.headers || {});
+    if (state.apiKey) headers["X-API-Key"] = state.apiKey;
+    const res = await fetch(path, Object.assign({}, options, { headers }));
+    let body = null;
+    try { body = await res.json(); } catch (e) { body = null; }
+    if (res.status === 401 && !state.apiKey) {
+      state.apiKey = window.prompt("This server requires an API key (X-API-Key):") || null;
+      if (state.apiKey) return api(path, options);
+    }
+    if (!res.ok) {
+      const msg = (body && (body.error || body.detail)) ? (body.error || JSON.stringify(body.detail)) : res.statusText;
+      throw new Error(`${res.status}: ${msg}`);
+    }
+    return body;
+  }
+
+  function fmt(n) { return (n === null || n === undefined) ? "–" : (typeof n === "number" ? n.toFixed(3) : String(n)); }
+
+  async function loadCapabilities() {
+    try {
+      const h = await api("/health");
+      const c = h.capabilities || {};
+      const parts = [
+        `storage: ${c.storage_mode || "?"}`,
+        `dense: ${c.dense_retrieval ? c.embedding_identity + (c.embedding_semantic ? "" : " (non-semantic test embeddings)") : "unavailable"}`,
+        `reranker: ${c.reranker_mode || "none"}`,
+        `generation: ${h.generation_available ? c.generation_provider : "unavailable (excerpts only)"}`,
+        `auth: ${h.auth}`,
+      ];
+      $("caps").textContent = parts.join(" · ");
+      if (h.startup_error) $("caps").textContent = "Startup error: " + h.startup_error;
+      if (!c.dense_retrieval) { $("mode").value = "lexical"; }
+    } catch (e) { $("caps").textContent = "Health check failed: " + e.message; }
+  }
+
+  async function loadDocuments() {
+    const list = $("doc-list");
+    try {
+      const docs = await api("/api/v1/documents");
+      if (!docs.length) { list.innerHTML = '<li class="empty">No documents indexed. Upload one to begin.</li>'; return; }
+      list.innerHTML = "";
+      for (const d of docs) {
+        const li = document.createElement("li");
+        li.innerHTML = `<div style="flex:1"><strong>${esc(d.filename)}</strong> <span class="status ${esc(d.status)}">${esc(d.status)}</span>
+          <div class="meta">v${d.version} · ${d.chunk_count} chunks${d.page_count ? ` · ${d.page_count} pages` : ""} · ${esc(d.doc_id.slice(0, 8))}…${d.error ? ` · <span class="error">${esc(d.error)}</span>` : ""}</div></div>`;
+        const scopeBtn = document.createElement("button"); scopeBtn.className = "secondary"; scopeBtn.textContent = "scope"; scopeBtn.title = "Restrict retrieval to this document";
+        scopeBtn.onclick = () => { state.scope = [d.doc_id]; state.scopeName = d.filename; $("scope-label").textContent = d.filename; $("clear-scope").hidden = false; };
+        const chunksBtn = document.createElement("button"); chunksBtn.className = "secondary"; chunksBtn.textContent = "chunks";
+        chunksBtn.onclick = () => showChunks(d);
+        const delBtn = document.createElement("button"); delBtn.className = "danger"; delBtn.textContent = "delete";
+        delBtn.onclick = async () => {
+          if (!window.confirm(`Delete ${d.filename} and all of its indexed data?`)) return;
+          try { const r = await api(`/api/v1/documents/${encodeURIComponent(d.doc_id)}`, { method: "DELETE" }); $("upload-result").textContent = `Deleted ${d.filename}: ${r.removed_chunks} chunks, ${r.removed_vectors} vectors, file removed: ${r.file_removed}.`; }
+          catch (e) { $("upload-result").innerHTML = `<span class="error">${esc(e.message)}</span>`; }
+          if (state.scope && state.scope[0] === d.doc_id) $("clear-scope").click();
+          loadDocuments();
+        };
+        li.append(scopeBtn, chunksBtn, delBtn);
+        list.appendChild(li);
+      }
+    } catch (e) { list.innerHTML = `<li class="error">${esc(e.message)}</li>`; }
+  }
+
+  async function showChunks(d) {
+    const panel = $("chunk-panel"); panel.hidden = false; panel.open = true;
+    $("chunk-view").innerHTML = '<p class="empty">Loading…</p>';
+    try {
+      const r = await api(`/api/v1/documents/${encodeURIComponent(d.doc_id)}/chunks?limit=200`);
+      $("chunk-view").innerHTML = `<p class="meta">${esc(d.filename)} v${r.version}: ${r.chunk_count} chunks (showing ${r.chunks.length})</p>` +
+        r.chunks.map(c => `<div class="hit"><div class="meta">#${c.ordinal} · chars ${c.location.char_start}–${c.location.char_end}${c.location.page ? ` · page ${c.location.page}${c.location.page_end && c.location.page_end !== c.location.page ? "–" + c.location.page_end : ""}` : ""}${c.location.section ? ` · ${esc(c.location.section)}` : ""}</div><pre>${esc(c.text)}</pre></div>`).join("");
+    } catch (e) { $("chunk-view").innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+  }
+
+  $("clear-scope").onclick = () => { state.scope = null; state.scopeName = null; $("scope-label").textContent = "whole corpus"; $("clear-scope").hidden = true; };
+
+  $("upload-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const file = $("file").files[0]; if (!file) return;
+    $("upload-btn").disabled = true; $("upload-result").textContent = `Indexing ${file.name}…`;
+    const form = new FormData(); form.append("file", file);
+    try {
+      const r = await api("/api/v1/documents/upload", { method: "POST", body: form });
+      const d = r.document;
+      $("upload-result").textContent = r.created ? `Indexed ${d.filename}: ${d.chunk_count} chunks${r.warnings.length ? " · warnings: " + r.warnings.join("; ") : ""}.` : `Identical content already indexed as ${d.filename}.`;
+    } catch (e) { $("upload-result").innerHTML = `<span class="error">${esc(e.message)}</span>`; }
+    $("upload-btn").disabled = false; $("file").value = "";
+    loadDocuments();
+  };
+
+  $("ask-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const topk = parseInt($("topk").value, 10);
+    if (!Number.isInteger(topk) || topk < 1) { $("ask-status").textContent = "Top k must be a positive integer."; return; }
+    const payload = { text: $("question").value, mode: $("mode").value, top_k: topk, use_reranker: $("rerank").value === "true", generate: $("generate").value === "true" };
+    if (state.scope) payload.doc_ids = state.scope;
+    $("ask-btn").disabled = true; $("ask-status").textContent = "Running…";
+    $("answer-status").innerHTML = ""; $("citations").innerHTML = ""; $("notes").textContent = "";
+    try {
+      const r = await api("/api/v1/query", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      render(r);
+      $("ask-status").textContent = `${r.processing_ms} ms · mode ${r.retrieval.mode_effective}${r.retrieval.mode_effective !== r.retrieval.mode_requested ? ` (requested ${r.retrieval.mode_requested})` : ""} · rerank ${r.retrieval.rerank_status}`;
+    } catch (e) {
+      $("answer").className = "answer error"; $("answer").textContent = e.message; $("ask-status").textContent = "Request failed.";
+      $("hits").innerHTML = '<p class="empty">Nothing retrieved.</p>';
+    }
+    $("ask-btn").disabled = false;
+  };
+
+  const STATUS_TEXT = {
+    answered: "Generated answer; every citation resolves to a passage that was in the model context.",
+    unverified_citations: "Generated answer, but citations are missing or do not resolve. Treat as unverified.",
+    insufficient_evidence: "No sufficient evidence in the selected scope; no answer generated.",
+    excerpts_only: "No generation provider configured or generation disabled; showing supporting excerpts instead of an answer.",
+    provider_error: "The generation provider failed; retrieval still succeeded.",
+  };
+
+  function render(r) {
+    $("answer-status").innerHTML = `<span class="status ${esc(r.status)}">${esc(r.status)}</span> <span class="meta">${esc(STATUS_TEXT[r.status] || "")}${r.generation.cached ? " · served from cache" : ""}${r.generation.model ? " · " + esc(r.generation.model) : ""}</span>`;
+    const ans = $("answer");
+    if (r.answer) { ans.className = "answer"; ans.textContent = r.answer; }
+    else if (r.status === "excerpts_only") { ans.className = "answer"; ans.innerHTML = r.excerpts.map(c => `<div><strong>[${esc(c.label)}]</strong> ${esc(c.filename)}${c.location.page ? `, page ${c.location.page}` : ""}${c.location.section ? `, ${esc(c.location.section)}` : ""}<pre style="white-space:pre-wrap;margin:4px 0 10px">${esc(c.text)}</pre></div>`).join(""); }
+    else { ans.className = "answer empty"; ans.textContent = r.generation.error || "No answer."; }
+    if (r.citations.length) {
+      $("citations").innerHTML = "<p class=\"meta\">Citations: " + r.citations.map(c => `<strong>[${esc(c.label)}]</strong> ${esc(c.filename)}${c.location.page ? ` p.${c.location.page}` : ""} (chunk #${c.ordinal})`).join(" · ") + "</p>";
+    }
+    if (r.unknown_citations.length) $("citations").innerHTML += `<p class="error">Unknown citation labels: ${esc(r.unknown_citations.join(", "))}</p>`;
+    const notes = [...(r.retrieval.notes || [])];
+    if (r.context.truncated) notes.push(`Context budget reached: ${r.context.hits_used} of ${r.context.hits_considered} retrieved passages entered the model context.`);
+    $("notes").textContent = notes.join(" ");
+    const used = new Set(r.context.blocks.map(b => b.chunk_id));
+    const labels = Object.fromEntries(r.context.blocks.map(b => [b.chunk_id, b.label]));
+    if (!r.sources.length) { $("hits").innerHTML = '<p class="empty">Nothing retrieved for this query and scope.</p>'; return; }
+    $("hits").innerHTML = r.sources.map(h => {
+      const s = h.scores; const loc = h.location;
+      return `<div class="hit ${used.has(h.chunk_id) ? "used" : ""}">
+        <div><strong>#${h.rank}</strong> ${used.has(h.chunk_id) ? `<strong>[${esc(labels[h.chunk_id])}]</strong> ` : ""}${esc(h.filename)} <span class="meta">chunk #${h.ordinal}${loc.page ? ` · page ${loc.page}${loc.page_end && loc.page_end !== loc.page ? "–" + loc.page_end : ""}` : ""}${loc.section ? ` · ${esc(loc.section)}` : ""} · chars ${loc.char_start}–${loc.char_end}</span></div>
+        <div class="scores">lexical ${fmt(s.lexical_score)} (rank ${fmt(s.lexical_rank)}) · vector sim ${fmt(s.vector_similarity)} (rank ${fmt(s.vector_rank)}) · fusion ${fmt(s.fusion_score)} · rerank ${fmt(s.rerank_score)}</div>
+        <pre>${esc(h.text)}</pre></div>`;
+    }).join("");
+  }
+
+  loadCapabilities(); loadDocuments();
+})();
+</script>
+</body>
+</html>

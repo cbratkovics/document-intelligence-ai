@@ -1,208 +1,185 @@
-from typing import List, Dict, Any, Optional
-import numpy as np
-from langchain_openai import OpenAIEmbeddings
-from langchain.embeddings.base import Embeddings
-import logging
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import time
+"""Embedding providers.
 
-from .config import settings
+Providers are constructed lazily from settings. Importing this module never
+imports a provider SDK, opens a connection, or loads a model.
+
+- ``openai``: OpenAI embeddings API (paid; requires ``OPENAI_API_KEY``).
+- ``local``: sentence-transformers model loaded from the local cache. Downloads
+  are refused unless ``ALLOW_MODEL_DOWNLOAD=true``.
+- ``hash``: deterministic hashed bag-of-words vectors. Test-only: proves the
+  vector plumbing but carries no semantic signal.
+- ``none``: dense retrieval disabled; the system runs lexical-only.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import math
+import os
+import re
+from typing import List, Optional, Protocol, Sequence
+
+from .config import Settings
 
 logger = logging.getLogger(__name__)
 
 
-class EmbeddingService:
-    """Service for generating document embeddings"""
+class EmbeddingProvider(Protocol):
+    identity: str
+    dimension: int
+    semantic: bool
 
-    def __init__(self, model_name: str = None):
-        self.model_name = model_name or settings.embedding_model
-        self.embeddings = self._initialize_embeddings()
-        self._executor = ThreadPoolExecutor(max_workers=5)
-
-    def _initialize_embeddings(self) -> Embeddings:
-        """Initialize the embedding model"""
-        try:
-            embeddings = OpenAIEmbeddings(
-                model=self.model_name, openai_api_key=settings.openai_api_key
-            )
-            logger.info(f"Initialized embedding model: {self.model_name}")
-            return embeddings
-        except Exception as e:
-            logger.error(f"Failed to initialize embeddings: {e}")
-            raise
-
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """
-        Generate embeddings for multiple documents
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            List of embedding vectors
-        """
-        if not texts:
-            return []
-
-        try:
-            start_time = time.time()
-
-            # Batch texts if too many
-            batch_size = 100
-            all_embeddings = []
-
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i : i + batch_size]
-                batch_embeddings = self.embeddings.embed_documents(batch)
-                all_embeddings.extend(batch_embeddings)
-
-                # Log progress for large batches
-                if len(texts) > batch_size:
-                    progress = min(i + batch_size, len(texts))
-                    logger.info(f"Embedded {progress}/{len(texts)} documents")
-
-            elapsed = time.time() - start_time
-            logger.info(f"Generated {len(all_embeddings)} embeddings in {elapsed:.2f}s")
-
-            return all_embeddings
-
-        except Exception as e:
-            logger.error(f"Error generating embeddings: {e}")
-            raise
+    def embed_documents(self, texts: Sequence[str]) -> List[List[float]]:
+        ...
 
     def embed_query(self, text: str) -> List[float]:
-        """
-        Generate embedding for a single query
+        ...
 
-        Args:
-            text: Query text to embed
 
-        Returns:
-            Embedding vector
-        """
-        try:
-            embedding = self.embeddings.embed_query(text)
-            return embedding
-        except Exception as e:
-            logger.error(f"Error generating query embedding: {e}")
-            raise
+class HashEmbeddings:
+    """Deterministic, dependency-free embeddings for plumbing tests."""
 
-    async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
-        """
-        Asynchronously generate embeddings for multiple documents
+    semantic = False
+    _token_re = re.compile(r"\w+")
 
-        Args:
-            texts: List of text strings to embed
+    def __init__(self, dimension: int = 64):
+        self.dimension = dimension
+        self.identity = f"hash:bow:{dimension}"
 
-        Returns:
-            List of embedding vectors
-        """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self._executor, self.embed_documents, texts)
+    def _vector(self, text: str) -> List[float]:
+        vec = [0.0] * self.dimension
+        for token in self._token_re.findall(text.lower()):
+            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+            index = int.from_bytes(digest[:4], "big") % self.dimension
+            sign = 1.0 if digest[4] % 2 == 0 else -1.0
+            vec[index] += sign
+        norm = math.sqrt(sum(v * v for v in vec))
+        if norm == 0.0:
+            vec[0] = 1.0
+            return vec
+        return [v / norm for v in vec]
 
-    async def aembed_query(self, text: str) -> List[float]:
-        """
-        Asynchronously generate embedding for a query
+    def embed_documents(self, texts: Sequence[str]) -> List[List[float]]:
+        return [self._vector(t) for t in texts]
 
-        Args:
-            text: Query text to embed
+    def embed_query(self, text: str) -> List[float]:
+        return self._vector(text)
 
-        Returns:
-            Embedding vector
-        """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self._executor, self.embed_query, text)
 
-    def compute_similarity(
-        self, embedding1: List[float], embedding2: List[float]
-    ) -> float:
-        """
-        Compute cosine similarity between two embeddings
+class OpenAIEmbeddings:
+    """OpenAI embeddings via the official SDK (imported lazily)."""
 
-        Args:
-            embedding1: First embedding vector
-            embedding2: Second embedding vector
+    semantic = True
+    _KNOWN_DIMENSIONS = {
+        "text-embedding-3-small": 1536,
+        "text-embedding-3-large": 3072,
+        "text-embedding-ada-002": 1536,
+    }
 
-        Returns:
-            Cosine similarity score (0-1)
-        """
-        # Convert to numpy arrays
-        vec1 = np.array(embedding1)
-        vec2 = np.array(embedding2)
-
-        # Compute cosine similarity
-        dot_product = np.dot(vec1, vec2)
-        norm1 = np.linalg.norm(vec1)
-        norm2 = np.linalg.norm(vec2)
-
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-
-        similarity = dot_product / (norm1 * norm2)
-
-        # Ensure result is between 0 and 1
-        return float(max(0.0, min(1.0, similarity)))
-
-    def find_similar_embeddings(
+    def __init__(
         self,
-        query_embedding: List[float],
-        embeddings: List[List[float]],
-        top_k: int = 5,
-        threshold: float = 0.7,
-    ) -> List[Dict[str, Any]]:
-        """
-        Find most similar embeddings to a query
+        model: str,
+        api_key: str,
+        base_url: Optional[str] = None,
+        timeout: float = 60.0,
+        batch_size: int = 100,
+        client=None,
+    ):
+        self.model = model
+        self.identity = f"openai:{model}"
+        self.batch_size = batch_size
+        self.dimension = self._KNOWN_DIMENSIONS.get(model, 0)
+        if client is None:
+            try:
+                from openai import OpenAI
+            except ImportError as exc:
+                raise RuntimeError(
+                    "The 'openai' package is required for embedding_provider=openai "
+                    "(pip install -r requirements-ml.txt)"
+                ) from exc
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+        self._client = client
 
-        Args:
-            query_embedding: Query embedding vector
-            embeddings: List of embeddings to search
-            top_k: Number of top results to return
-            threshold: Minimum similarity threshold
+    def embed_documents(self, texts: Sequence[str]) -> List[List[float]]:
+        out: List[List[float]] = []
+        for i in range(0, len(texts), self.batch_size):
+            batch = [t if t.strip() else " " for t in texts[i : i + self.batch_size]]
+            response = self._client.embeddings.create(model=self.model, input=batch)
+            vectors = [item.embedding for item in sorted(response.data, key=lambda d: d.index)]
+            if len(vectors) != len(batch):
+                raise RuntimeError("Embedding provider returned an unexpected count")
+            out.extend(vectors)
+        if out and not self.dimension:
+            self.dimension = len(out[0])
+        return out
 
-        Returns:
-            List of dictionaries with index and similarity score
-        """
-        similarities = []
+    def embed_query(self, text: str) -> List[float]:
+        return self.embed_documents([text])[0]
 
-        for i, embedding in enumerate(embeddings):
-            similarity = self.compute_similarity(query_embedding, embedding)
-            if similarity >= threshold:
-                similarities.append({"index": i, "similarity": similarity})
 
-        # Sort by similarity (descending)
-        similarities.sort(key=lambda x: x["similarity"], reverse=True)
+class LocalEmbeddings:
+    """sentence-transformers embeddings loaded from the local HF cache."""
 
-        # Return top k results
-        return similarities[:top_k]
+    semantic = True
 
-    def get_embedding_dimension(self) -> int:
-        """Get the dimension of the embedding model"""
-        # Generate a test embedding to get dimension
-        test_embedding = self.embed_query("test")
-        return len(test_embedding)
+    def __init__(self, model_name: str, allow_download: bool, device: str = "cpu"):
+        self.identity = f"local:{model_name}"
+        if not allow_download:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise RuntimeError(
+                "sentence-transformers is required for embedding_provider=local "
+                "(pip install -r requirements-ml.txt)"
+            ) from exc
+        try:
+            self._model = SentenceTransformer(model_name, device=device)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not load local embedding model '{model_name}'. Prepare it "
+                "with `python scripts/setup/init_models.py --embedding` or set "
+                "ALLOW_MODEL_DOWNLOAD=true."
+            ) from exc
+        self.dimension = int(self._model.get_sentence_embedding_dimension() or 0)
 
-    def validate_embeddings(self, embeddings: List[List[float]]) -> bool:
-        """Validate that embeddings are properly formatted"""
-        if not embeddings:
-            return True
+    def embed_documents(self, texts: Sequence[str]) -> List[List[float]]:
+        vectors = self._model.encode(list(texts), normalize_embeddings=True)
+        return [list(map(float, v)) for v in vectors]
 
-        expected_dim = len(embeddings[0])
+    def embed_query(self, text: str) -> List[float]:
+        return self.embed_documents([text])[0]
 
-        for i, embedding in enumerate(embeddings):
-            if not isinstance(embedding, list):
-                logger.error(f"Embedding {i} is not a list")
-                return False
 
-            if len(embedding) != expected_dim:
-                logger.error(
-                    f"Embedding {i} has dimension {len(embedding)}, "
-                    f"expected {expected_dim}"
-                )
-                return False
+def build_embedding_provider(settings: Settings) -> Optional[EmbeddingProvider]:
+    """Instantiate the configured provider, or ``None`` for lexical-only mode."""
+    name = settings.resolved_embedding_provider
+    if name == "none":
+        return None
+    if name == "hash":
+        return HashEmbeddings()
+    if name == "openai":
+        return OpenAIEmbeddings(
+            model=settings.openai_embedding_model,
+            api_key=settings.openai_api_key or "",
+            base_url=settings.openai_base_url,
+            timeout=settings.openai_timeout_seconds,
+        )
+    if name == "local":
+        return LocalEmbeddings(
+            settings.local_embedding_model, allow_download=settings.allow_model_download
+        )
+    raise ValueError(f"Unknown embedding provider: {name}")
 
-            if not all(isinstance(x, (int, float)) for x in embedding):
-                logger.error(f"Embedding {i} contains non-numeric values")
-                return False
 
-        return True
+async def embed_documents_async(
+    provider: EmbeddingProvider, texts: Sequence[str]
+) -> List[List[float]]:
+    return await asyncio.to_thread(provider.embed_documents, texts)
+
+
+async def embed_query_async(provider: EmbeddingProvider, text: str) -> List[float]:
+    return await asyncio.to_thread(provider.embed_query, text)

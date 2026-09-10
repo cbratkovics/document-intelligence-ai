@@ -22,9 +22,8 @@ Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md) to maintain a w
 ### Prerequisites
 
 - Python 3.11+
-- Docker and Docker Compose
 - Git
-- Pre-commit hooks
+- Docker (optional, for the container smoke test)
 
 ### Development Setup
 
@@ -43,7 +42,7 @@ Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md) to maintain a w
 3. Install development dependencies:
    ```bash
    pip install -r requirements-dev.txt
-   pre-commit install
+   make lint
    ```
 
 4. Set up environment variables:
@@ -123,7 +122,7 @@ def process_document(file_path: str, chunk_size: int = 1000) -> List[Document]:
 ### Testing Standards
 
 - Write tests for all new functionality
-- Maintain or improve code coverage (minimum 85%)
+- Add tests that fail under the behavior you are fixing
 - Use pytest fixtures for reusable test components
 - Include both unit and integration tests
 - Mock external dependencies appropriately
@@ -165,7 +164,6 @@ We follow the Conventional Commits specification:
 feat(api): add batch document upload endpoint
 
 - Implement multipart upload for multiple files
-- Add progress tracking via websockets
 - Limit batch size to 50 files
 
 Closes #123
@@ -176,7 +174,7 @@ Closes #123
 ### Unit Tests
 - Test individual functions and classes
 - Mock external dependencies
-- Aim for 100% coverage of business logic
+- Cover the failure paths, not only the happy path
 
 ### Integration Tests
 - Test API endpoints end-to-end

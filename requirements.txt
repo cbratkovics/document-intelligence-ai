@@ -1,10 +1,6 @@
-# Document Intelligence AI - Requirements
+# Default installation: the offline-capable core (lexical retrieval, API, PDF/text ingestion).
 #
-# Default installation uses base requirements
+#   pip install -r requirements.txt        # core, no provider keys needed
+#   pip install -r requirements-ml.txt     # adds OpenAI client and local model support
+#   pip install -r requirements-dev.txt    # adds test and lint tooling
 -r requirements-base.txt
-
-# For ML features, also install:
--r requirements-ml.txt
-
-# For development:
-# -r requirements-dev.txt
