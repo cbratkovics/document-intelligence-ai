@@ -6,6 +6,10 @@ Document search and evidence-grounded question answering over a local corpus.
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
+> **Reviewing this as an engineering portfolio project?** Start with the
+> [engineering case study](docs/ENGINEERING_CASE_STUDY.md) for the problem,
+> decisions, evidence map, five-minute demo, and interview discussion guide.
+
 Upload text, Markdown, reStructuredText, or PDF files; inspect how they were
 chunked; search them with BM25, dense vectors, or a fusion of both; ask a
 question scoped to selected documents; see exactly which passages supported
@@ -107,6 +111,30 @@ The application never downloads models at import, startup, or request time.
 | Prometheus metrics with route-template labels | Tested | `tests/test_api.py` |
 | Retrieval evaluation with hand-checked metric conventions and a provenance-stamped artifact | Tested and run in CI | `tests/test_eval_metrics.py`, `eval/` |
 | Experimental components under `app/` (semantic cache, chunking strategies, embedding factory, Celery tasks) | Not wired into the API | `app/README.md` |
+
+## Why this project is portfolio-ready
+
+This repository is designed to make engineering judgment inspectable rather
+than merely list AI tooling. A reviewer can trace product behavior from the
+API contract through lifecycle invariants and failure-path tests, reproduce an
+offline evaluation without credentials, and see limitations stated alongside
+capabilities. The strongest signals are:
+
+- **Applied AI:** hybrid retrieval, optional reranking, bounded context
+  assembly, grounded prompting, citation validation, and abstention.
+- **Backend engineering:** typed FastAPI contracts, transactional document
+  lifecycle behavior, persistent state, streaming, access control, and
+  operational health endpoints.
+- **Evaluation discipline:** versioned judgments, explicit metric conventions,
+  reproducible artifacts, and a clear distinction between plumbing tests and
+  quality evidence.
+- **Production judgment:** fail-closed index compatibility, bounded inputs,
+  rollback and deletion semantics, observability, container smoke tests, and
+  candid deployment boundaries.
+
+See the [engineering case study](docs/ENGINEERING_CASE_STUDY.md) for a
+competency-to-evidence matrix, defensible resume language, and a prioritized
+roadmap that turns the current limitations into potential follow-up projects.
 
 ## Architecture
 
