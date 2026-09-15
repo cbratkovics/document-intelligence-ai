@@ -1,126 +1,132 @@
-# Engineering case study and portfolio guide
+# Document Intelligence: Retrieval Architecture and Lifecycle Guarantees
 
-This document explains the engineering story behind the repository and gives
-reviewers a short, reproducible path through its evidence. It is intentionally
-specific about what the project proves, what it does not prove, and which next
-steps would create the strongest additional career signal.
+This case study describes the system's document lifecycle, retrieval pipeline,
+failure semantics, and reproducible verification path. `docs/ARCHITECTURE.md`
+is the detailed component reference; this document connects those components to
+the product constraints they enforce.
 
-## Executive summary
+## Product purpose and constraints
 
-The project is a local-first document intelligence service: users ingest a
-small corpus, retrieve evidence with lexical, dense, or fused search, and ask
-questions whose answers are tied to the exact chunks supplied to the model.
-It remains useful with no API key—lexical retrieval and evidence excerpts work
-offline—while optional providers add semantic retrieval and generation.
+The service searches and answers questions over a local document corpus. Users
+can upload text, Markdown, reStructuredText, or text-layer PDFs, inspect the
+resulting chunks, restrict a query to selected documents, and remove documents
+from every application-controlled store.
 
-The central engineering problem is not simply calling an LLM. It is preserving
-trust across mutable documents and partially available dependencies. An answer
-must never cite a stale document version, a failed ingestion must not become
-searchable, an empty scope must not broaden into the entire corpus, and a
-provider failure must not be presented as low confidence or no evidence.
+The default path is deliberately credential-free. BM25 retrieval and evidence
+excerpts work without model downloads or provider keys. Dense retrieval,
+cross-encoder or LLM reranking, and generated answers are configuration-dependent
+capabilities and are not exercised by the default offline evaluation.
 
-The implementation addresses that problem with an authoritative SQLite
-manifest, staged lifecycle operations, independently scoped retrieval
-branches, hydration against current manifest state, explicit outcome statuses,
-and tests for failure paths. `docs/ARCHITECTURE.md` is the normative technical
-description; this document focuses on the product and career narrative.
+The design prioritizes these invariants:
 
-## The problem and constraints
+- only a ready document's current version is searchable;
+- a failed write does not expose partially indexed content;
+- an explicit empty scope returns no evidence rather than widening to the corpus;
+- provider unavailability and provider errors remain distinguishable from an
+  evidence-free result; and
+- bounded inputs, candidate pools, context, and caches limit local resource use.
 
-### User need
+## Document ingestion, replacement, and deletion lifecycle
 
-A user reviewing policies or operational documents needs to:
+SQLite is the lifecycle authority for document identity, version, status,
+chunks, and the corpus generation. The process-local BM25 index is derived from
+ready manifest records. When configured, Chroma stores vectors with document
+and version metadata.
 
-1. know which files are actually indexed;
-2. limit a question to selected documents;
-3. inspect the passages behind a result;
-4. distinguish “not found” from a provider outage;
-5. replace or delete content without old versions leaking into results.
-
-### Deliberate constraints
-
-- **Useful without secrets.** CI and the default developer path cannot depend
-  on paid APIs or model downloads.
-- **Evidence before claims.** Feature claims map to tests or executable
-  evaluation; the sample corpus is not represented as a production benchmark.
-- **One process and one corpus.** The in-memory lexical index makes this an
-  explicit deployment boundary rather than a hidden scaling claim.
-- **Bounded work.** Uploads, extracted text, chunks, query length, candidate
-  counts, context, and cache size have configured bounds.
-- **No silent degradation.** Effective retrieval mode, unavailable reranking,
-  generation errors, truncated context, and invalid citations are surfaced.
-
-## System walkthrough
-
-### Write path
+### Ingestion
 
 ```text
-upload
-  -> bounded read and file validation
-  -> extraction with source locations
-  -> offset-preserving chunks
-  -> manifest status = indexing
-  -> optional embeddings and vector writes
-  -> manifest status = ready
-  -> lexical-index rebuild and cache invalidation
+bounded upload -> validate and extract -> chunk with source locations
+  -> manifest status=indexing -> optional vector write and verification
+  -> manifest status=ready -> rebuild BM25 -> bump corpus generation
+  -> clear answer cache
 ```
 
-If a required stage fails, the service rolls back the chunks, vectors, and
-stored file. Replacement builds the next version while the current version
-stays available, then switches the manifest only after the new version is
-ready. Deletion excludes the record first and reports incomplete cleanup
-honestly if a backing store cannot be updated.
+The service stages mutations in that order. If a required stage fails, it
+removes staged chunks, vectors, and the stored file. A new failed record remains
+visible with `failed` status for diagnosis and retry, but retrieval cannot use
+it. Identical bytes are deduplicated by content hash within the shared corpus.
 
-### Read path
+### Replacement
+
+Replacement builds version `n+1` while version `n` remains current. The
+manifest switches versions only after required writes succeed, then old chunks,
+vectors, and the stored file are removed. An identical replacement is a no-op.
+This sequencing avoids a read gap and prevents an incomplete replacement from
+becoming current.
+
+### Deletion
+
+Deletion first marks a document deleted, excluding it from retrieval, and then
+removes vectors for every version, chunks, the stored file, and the manifest
+row. If backing-store cleanup fails, the API reports `deletion_incomplete` and
+leaves the document excluded; retrying deletion can finish cleanup. Successful
+mutations rebuild BM25 and invalidate cached answers through a corpus-generation
+change.
+
+## Retrieval, scope enforcement, hydration, and answer generation
 
 ```text
-question and document scope
-  -> scope validation
+query and optional document scope -> validate scope
   -> scoped BM25 and/or scoped vector candidates
-  -> reciprocal-rank fusion by chunk identity
-  -> hydration from ready, current manifest versions
-  -> optional reranking
-  -> bounded evidence context [S1..Sn]
-  -> optional generation
-  -> citation validation and explicit answer status
+  -> reciprocal-rank fusion by chunk id -> current-version hydration
+  -> optional reranking -> top-k -> bounded evidence context
+  -> optional generation -> citation-label validation -> explicit status
 ```
 
-Hydrating candidates from the manifest is an important second line of defense:
-even if an index contains stale data, it cannot be returned for a non-current
-or non-ready document version.
+`None` means whole-corpus scope; an explicit empty list means search nothing.
+Unknown and non-ready document IDs are rejected. Both lexical and vector
+candidate generators apply scope before fusion. The retriever then loads chunks
+from the manifest and discards candidates that are missing, out of scope,
+non-ready, or not from the document's current version. This hydration step is a
+second defense against stale index entries.
 
-## Key decisions and trade-offs
+BM25 is always available. Requested hybrid retrieval falls back transparently
+to lexical retrieval when no embedding provider is configured and reports the
+effective mode. Vector-only retrieval instead returns a capability error.
+Hybrid mode uses reciprocal-rank fusion because lexical scores and cosine
+distance do not share a meaningful numeric scale.
 
-| Decision | Benefit | Cost / boundary |
+Answer context is assembled in rank order under a character budget and labels
+evidence `[S1]` through `[Sn]`. Generation is optional: without a provider the
+API returns `excerpts_only`. With a provider, source labels are checked against
+the context actually supplied. That check detects missing or invented labels;
+it does not prove that every generated claim is entailed by its cited passage.
+
+## Design decisions and trade-offs
+
+| Decision | Benefit | Cost or boundary |
 |---|---|---|
-| SQLite manifest is authoritative | Durable lifecycle state and simple local operation | Not a multi-writer, horizontally scaled design |
-| In-memory BM25 is rebuilt after mutations | Straightforward consistency with the manifest | Rebuild cost and single-process deployment |
-| Chroma collection declares cosine space and embedding identity | Score interpretation is explicit; incompatible vectors fail closed | Changing embedding configuration requires re-indexing |
-| RRF combines ranks, not unlike raw scores | Avoids pretending BM25 and vector scores share a scale | Rank fusion discards magnitude information |
-| Every retrieval branch applies document scope | Prevents out-of-scope evidence entering fusion | Filtering can reduce recall for very narrow scopes |
-| Context assembly has a character budget | Predictable request size and explicit truncation | Character counts approximate, rather than exactly measure, tokens |
-| Citation checking validates source labels | Detects invented or missing evidence references | Structural validity does not prove claim entailment |
-| Offline mode returns excerpts | The core product and CI work without secrets | It does not demonstrate live answer quality |
-| Provider imports and model loading are lazy | Startup is deterministic and offline-safe | Optional paths need separate environment validation |
+| SQLite manifest is authoritative | Durable lifecycle state with simple local operation | Not a horizontally scaled multi-writer design |
+| BM25 is rebuilt after committed mutations | Sparse state follows current manifest state | Rebuild cost and process-local visibility |
+| Vector metadata records cosine space and embedding identity | Incompatible non-empty indexes fail closed | Configuration changes require deliberate re-indexing |
+| RRF combines ranks | Avoids comparing incompatible raw scores | Discards score magnitude |
+| Every retrieval branch applies document scope | Prevents out-of-scope evidence from entering fusion | Narrow scopes may reduce recall |
+| Manifest hydration follows candidate generation | Filters stale versions even when an index contains them | Adds storage reads to retrieval |
+| Context uses a character budget | Predictable and observable truncation | Character counts only approximate tokens |
+| Provider imports and model loads are lazy | Offline startup and tests stay deterministic | Optional integrations require separate environments |
 
-## Competency-to-evidence map
+## Implementation and verification map
 
-Use this table as a reviewer index, not as a substitute for reading the code.
-
-| Competency | Concrete evidence | What to discuss |
+| Concern | Implementation | Verification |
 |---|---|---|
-| API design | `src/api/endpoints.py`, `src/api/schemas.py`, `tests/test_api.py` | Strict requests, outcome statuses, upload bounds, NDJSON contract |
-| Data modeling and consistency | `src/core/manifest.py`, `src/rag/service.py`, `tests/test_lifecycle.py` | Source of truth, staged commits, replacement, retryable deletion |
-| Information retrieval | `src/core/lexical.py`, `src/rag/hybrid_search.py`, `src/rag/retriever.py` | BM25 semantics, cosine distance, RRF, filtering and hydration |
-| LLM reliability | `src/rag/generator.py`, `tests/test_retrieval_generation.py` | Context budgeting, abstention, citations, streaming cleanup |
-| Evaluation | `eval/retrieval_metrics.py`, `eval/run_eval.py`, `tests/test_eval_metrics.py` | Metric conventions, judgments, provenance, scenario checks |
-| Security and privacy | `src/api/deps.py`, `src/utils/document_loader.py`, `.github/workflows/ci.yml` | Auth boundary, file validation, secret/dependency scanning |
-| Operability | `src/api/health.py`, `src/monitoring/metrics.py`, `docker/` | Readiness, route-template metrics, persistent container smoke test |
-| Engineering communication | `README.md`, `docs/ARCHITECTURE.md`, this case study | Claims backed by evidence; limitations and trade-offs are explicit |
+| Lifecycle authority and staged mutations | `src/core/manifest.py`, `src/rag/service.py` | `tests/test_lifecycle.py` |
+| Scoped lexical retrieval | `src/core/lexical.py`, `src/rag/retriever.py` | `tests/test_indexes.py`, `tests/test_retrieval_generation.py` |
+| Dense retrieval and fusion | `src/core/vector_store.py`, `src/rag/hybrid_search.py` | deterministic embedding doubles in `tests/test_indexes.py` |
+| Current-version hydration and reranking | `src/rag/retriever.py`, `src/rag/reranker.py` | `tests/test_retrieval_generation.py` |
+| Context, statuses, citations, and streaming | `src/rag/generator.py`, `src/api/endpoints.py` | `tests/test_retrieval_generation.py`, `tests/test_api.py` |
+| Request and response contracts | `src/api/schemas.py`, `src/api/endpoints.py` | `tests/test_api.py` |
+| Offline retrieval metrics and scenarios | `eval/retrieval_metrics.py`, `eval/run_eval.py` | `tests/test_eval_metrics.py`, sample-corpus evaluation |
+| Publication content policy | `scripts/check_publication.py` | `tests/test_publication.py`, CI publication check |
 
-## Five-minute reviewer demo
+Failure-path tests cover staged-ingestion rollback, replacement failures,
+retryable deletion, stale candidates, empty and invalid scopes, unavailable or
+failed rerankers, generation errors, invalid citations, and stream cleanup.
+Provider doubles verify contracts without claiming live-provider validation.
 
-This path requires Python 3.11 but no credentials or model downloads.
+## Reproducible local walkthrough
+
+This path uses Python 3.11 and requires no credentials or model downloads.
 
 ```bash
 python3.11 -m venv .venv
@@ -132,149 +138,76 @@ APP_ENV_FILE=/nonexistent/.env uvicorn src.api.main:app --host 127.0.0.1 --port 
 In a second shell:
 
 ```bash
-# Confirm startup and effective provider modes.
 curl -s http://127.0.0.1:8000/health | python -m json.tool
 
-# Ingest a known document.
 curl -s -F file=@eval/sample_corpus/docs/refund-policy.md \
   http://127.0.0.1:8000/api/v1/documents/upload | python -m json.tool
 
-# Show transparent lexical fallback and inspect ranked evidence.
 curl -s -H 'Content-Type: application/json' \
   -d '{"text":"How long do refunds take?","mode":"hybrid"}' \
   http://127.0.0.1:8000/api/v1/search | python -m json.tool
 
-# Run the reproducible retrieval evaluation.
 python -m eval.run_eval --embedding none --out /tmp/doc-intel-eval.json
 python -m json.tool /tmp/doc-intel-eval.json | head -80
 ```
 
-Then show one lifecycle test and one generation-contract test rather than
-scrolling through the entire suite:
+The search response should report `mode_effective=lexical` when embeddings are
+not configured. The evaluation output is temporary and records configuration,
+source and corpus hashes, query rankings, metrics, and lifecycle scenario
+results. Run the lifecycle and generation contracts separately with:
 
 ```bash
 pytest tests/test_lifecycle.py -q
 pytest tests/test_retrieval_generation.py -q
 ```
 
-## Interview discussion guide
+## Evaluation procedure and measurement scope
 
-### A concise project narrative
+`python -m eval.run_eval --embedding none` ingests the small fictional sample
+corpus into disposable storage, evaluates document rankings against checked-in
+judgments, and runs scope, replacement, and deletion scenarios. The metric
+implementation defines precision, recall, reciprocal rank, and nDCG conventions
+explicitly. Hash embeddings can verify dense and hybrid plumbing but are not
+semantic quality evidence.
 
-> I built a local-first RAG service around a trust problem: retrieval and
-> generation must stay consistent while documents change and providers fail.
-> I made SQLite the lifecycle authority, staged index mutations, scoped both
-> retrieval branches, revalidated candidates against current state, and made
-> degradation explicit in the API. I also created an offline evaluation path
-> so the important behavior is reproducible without credentials.
+The corpus and judgments are regression fixtures, not a representative quality
+benchmark. They do not establish production accuracy, latency, throughput,
+cost, live-provider behavior, or answer groundedness. A representative
+evaluation would require domain queries, slice analysis, human relevance and
+entailment labels, and separately reported operational measurements.
 
-### Questions this project can answer well
+## Operational boundaries and technical roadmap
 
-**Why not use vector search alone?** Lexical search is deterministic, cheap,
-and strong for exact identifiers and policy terms. Dense retrieval is useful
-for paraphrases. RRF combines rankings without treating their raw scores as
-commensurate, and the response retains each score for inspection.
+Current operation is one process serving one corpus. BM25 is in memory, so
+multi-worker serving is unsupported; authentication is one optional shared API
+key, not tenant isolation. PDF ingestion requires a text layer. Citation checks
+validate labels rather than factual entailment. Provider-side retention and
+external backups are outside application-controlled deletion.
 
-**How do you prevent stale answers after replacement?** The old version stays
-current during indexing. The manifest switches only after required writes
-succeed; old artifacts are then removed. Retrieval also hydrates candidates
-against ready/current manifest state, and the cache key includes the corpus
-generation.
+Technical follow-up work should preserve these boundaries until each change is
+implemented and verified:
 
-**What does citation validation guarantee?** It guarantees that every cited
-label maps to evidence actually placed in model context. It does not establish
-that a claim is entailed by that evidence; entailment verification is a
-documented follow-up opportunity.
+1. Expand representative retrieval judgments and add human-reviewed
+   groundedness and unanswerable-query evaluation.
+2. For multi-process operation, move sparse retrieval to shared durable storage
+   and use idempotent jobs or an outbox for index mutations and reconciliation.
+3. Add concurrency tests for upload, replacement, query, and deletion races
+   before asserting distributed lifecycle guarantees.
+4. Add claim-to-source entailment evaluation and document trust policies rather
+   than treating structural citations as factual verification.
+5. Add OCR or new formats only with extraction-quality statuses, provenance,
+   difficult fixtures, and observable failure handling.
 
-**What would break first at scale?** The process-local BM25 index and rebuilds
-make horizontal scaling inappropriate. The next design would use a shared
-sparse index plus transactional/outbox-driven index updates, with corpus and
-tenant isolation designed into storage and authorization.
+## Technical FAQ
 
-**How do you know retrieval is good?** The checked-in judgments and metric
-implementation make a small, reproducible regression suite. They validate
-metric and pipeline behavior, not general quality. A real deployment needs a
-larger representative query set, slice analysis, latency/cost tracking, and
-human review of answer groundedness.
+**Why retain lexical retrieval?** It is deterministic, credential-free, and
+effective for exact identifiers and policy terms. Dense retrieval is optional
+and useful for semantic similarity; hybrid mode combines their ranks.
 
-## Defensible resume language
+**Why can stale vectors not become answers?** Scope is applied during candidate
+generation and candidates are hydrated against ready, current manifest state.
+Replacement and deletion sequencing provide additional lifecycle protection.
 
-Tailor these bullets to the role and only add measured numbers from a real,
-reproducible run. Do not invent scale, latency, accuracy, or users.
-
-- Built a FastAPI document-intelligence service with BM25/vector retrieval,
-  reciprocal-rank fusion, optional reranking, and citation-checked generation.
-- Designed staged ingestion, versioned replacement, and retryable deletion
-  around an authoritative SQLite manifest to prevent stale or partial index
-  state from becoming searchable.
-- Created credential-free retrieval evaluations with explicit metric
-  conventions, provenance-stamped artifacts, and regression tests for scope,
-  replacement, and deletion behavior.
-- Implemented bounded context assembly and structured NDJSON streaming with
-  explicit abstention, degradation, citation-validation, and cancellation
-  semantics.
-- Added typed API contracts, health/readiness checks, Prometheus metrics,
-  container smoke testing, static analysis, and security scanning in CI.
-
-### Role-specific emphasis
-
-- **Applied AI / ML engineer:** lead with retrieval evaluation, hybrid search,
-  context construction, provider abstraction, and groundedness limitations.
-- **Backend engineer:** lead with lifecycle invariants, failure recovery,
-  streaming contracts, persistent state, input bounds, and API tests.
-- **Platform / MLOps engineer:** lead with offline determinism, configuration
-  identity, readiness behavior, metrics, Docker validation, and CI gates.
-
-## Prioritized roadmap for stronger career signal
-
-The ordering favors demonstrable engineering depth over adding more framework
-names.
-
-### 1. Evaluation depth (highest leverage)
-
-- Expand judgments with realistic, adversarial, and unanswerable queries.
-- Report retrieval slices by document type, query type, and scope size.
-- Add answer-level groundedness review with a human-labeled calibration set.
-- Record latency, token use, and provider cost separately from quality.
-
-**Why it matters:** this turns a correct pipeline demonstration into credible
-evidence of iterative ML-system improvement.
-
-### 2. Multi-process indexing architecture
-
-- Move sparse retrieval to shared durable infrastructure.
-- Introduce an outbox/job model for idempotent index mutations.
-- Add concurrency tests for upload, replacement, query, and deletion races.
-- Define recovery and reconciliation procedures before claiming scale.
-
-**Why it matters:** this demonstrates distributed-systems reasoning without
-pretending the current local design is already distributed.
-
-### 3. Stronger groundedness and security
-
-- Add claim-to-source entailment checks evaluated against labeled examples.
-- Test prompt-injection corpora and document-level trust policies.
-- Add tenant-aware authorization only together with storage/index isolation.
-
-**Why it matters:** reliability and security are more differentiating than
-another retrieval provider adapter.
-
-### 4. Broader ingestion with observable quality
-
-- Add OCR or DOCX behind explicit capability and quality statuses.
-- Preserve page/layout provenance and test difficult fixtures.
-- Measure extraction failures rather than silently accepting empty content.
-
-**Why it matters:** ingestion quality often bounds downstream RAG quality and
-creates a concrete end-to-end applied AI story.
-
-## Claims to avoid
-
-The repository does **not** currently establish production scale,
-multi-tenancy, OCR support, semantic quality from hash embeddings, live model
-quality, or claim-level factual correctness. Avoid “enterprise-ready,” “high
-accuracy,” and performance claims unless a future reproducible artifact
-defines the workload, environment, baseline, and measurement method.
-
-That restraint is part of the portfolio signal: the project distinguishes
-implemented behavior, tested behavior, optional capability, and future work.
+**What fails first beyond the supported deployment boundary?** Process-local
+BM25 state is not coordinated between workers. Shared sparse storage and a
+reconciled mutation protocol are prerequisites for horizontal serving.
