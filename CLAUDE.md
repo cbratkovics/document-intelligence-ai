@@ -2,8 +2,8 @@
 
 Document search and evidence-grounded question answering over a local corpus.
 Application code lives in `src/`; `app/` is experimental and not wired in
-(except the optional cross-encoder). Positioning: implementation quality and
-defensible evidence, not infrastructure lists.
+(except the optional cross-encoder). Documentation must distinguish implemented,
+tested, optional, and planned behavior.
 
 ## Commands
 

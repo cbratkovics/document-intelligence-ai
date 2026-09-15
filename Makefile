@@ -1,4 +1,4 @@
-.PHONY: help install install-ml install-dev dev test lint format eval docker-build docker-smoke clean
+.PHONY: help install install-ml install-dev dev test lint publication-check format eval docker-build docker-smoke clean
 
 help:
 	@echo "make install       core dependencies (offline-capable)"
@@ -7,6 +7,7 @@ help:
 	@echo "make dev           run the API on http://127.0.0.1:8000"
 	@echo "make test          run the test suite"
 	@echo "make lint          black/isort/flake8/mypy/bandit checks"
+	@echo "make publication-check  scan tracked public text for prohibited coaching material"
 	@echo "make format        apply black and isort"
 	@echo "make eval          offline evaluation run (lexical, no key)"
 	@echo "make docker-build  build the runtime image"
@@ -33,6 +34,9 @@ lint:
 	flake8 src tests eval
 	mypy src
 	bandit -r src -ll -q
+
+publication-check:
+	python scripts/check_publication.py
 
 format:
 	black src tests eval
