@@ -196,6 +196,10 @@ class RetrievalResult:
     timings_ms: Dict[str, float] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
     candidate_k: int = 0  # candidates requested from each retrieval branch
+    # Candidates each branch actually returned (None when the branch did not
+    # run). A missing branch rank means "no match" when the branch returned
+    # fewer than candidate_k, and "outside the top candidate_k" otherwise.
+    candidates_returned: Dict[str, Optional[int]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -206,6 +210,7 @@ class RetrievalResult:
             "scope": self.scope.to_dict(),
             "corpus_generation": self.corpus_generation,
             "candidate_k": self.candidate_k,
+            "candidates_returned": dict(self.candidates_returned),
             "timings_ms": self.timings_ms,
             "notes": list(self.notes),
         }

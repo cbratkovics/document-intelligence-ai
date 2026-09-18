@@ -32,11 +32,32 @@ def test_fusion_rank_and_candidate_pool_are_reported(tmp_path):
         ranks = [(r["rank"], r["scores"]["fusion_rank"]) for r in hybrid["results"]]
         assert ranks and all(rank == fused for rank, fused in ranks)
         assert hybrid["candidate_k"] == 16  # top_k * candidate_multiplier
+        # The corpus is smaller than the pool, so a missing branch rank means
+        # "no match", and the counts say so: every chunk has a dense rank while
+        # only chunks containing a query term have a lexical one.
+        returned = hybrid["candidates_returned"]
+        chunk_total = sum(d["chunk_count"] for d in client.get("/api/v1/documents").json())
+        assert returned["vector"] == chunk_total < hybrid["candidate_k"]
+        assert returned["lexical"] == sum(
+            1 for r in hybrid["results"] if r["scores"]["lexical_rank"] is not None
+        )
+        assert returned["lexical"] <= returned["vector"]
+        # A term that appears in one chunk: the lexical branch returns exactly
+        # that chunk, every other hit has no lexical rank, and the counts make
+        # the reason unambiguous (1 returned is fewer than the pool of 16).
+        narrow = client.post(
+            "/api/v1/search", json={"text": "expedited", "mode": "hybrid", "top_k": 4}
+        ).json()
+        assert narrow["candidates_returned"] == {"lexical": 1, "vector": chunk_total}
+        assert [r["scores"]["lexical_rank"] for r in narrow["results"]].count(None) == len(
+            narrow["results"]
+        ) - 1
         lexical = client.post(
             "/api/v1/search", json={"text": "refund delivery days", "mode": "lexical"}
         ).json()
         assert all(r["scores"]["fusion_rank"] is None for r in lexical["results"])
         assert all(r["scores"]["fusion_score"] is None for r in lexical["results"])
+        assert lexical["candidates_returned"]["vector"] is None  # branch did not run
         reranked = client.post(
             "/api/v1/search",
             json={"text": "refund delivery days", "mode": "hybrid", "use_reranker": True},

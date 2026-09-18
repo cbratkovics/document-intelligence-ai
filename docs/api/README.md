@@ -97,8 +97,10 @@ Response: `results` (each with `chunk_id`, `doc_id`, `version`, `ordinal`,
 reranking), `rerank_score`, and `rank`), plus `mode_requested`,
 `mode_effective`, `rerank_status` (`applied`/`disabled`/`unavailable`/`failed`),
 `reranker`, `scope`, `corpus_generation`, `candidate_k` (candidates requested
-per branch; a null branch rank means outside that top list), `timings_ms`,
-`notes`.
+per branch), `candidates_returned` (what each branch actually returned, null
+for a branch that did not run; a null branch rank means "no match" when the
+branch returned fewer than `candidate_k` and "outside the top `candidate_k`"
+otherwise), `timings_ms`, `notes`.
 
 ## Question answering
 

@@ -153,6 +153,19 @@ class Retriever:
             vector_hits = await asyncio.to_thread(store.query, embedding, pool, scope)
             timings["vector_ms"] = (time.perf_counter() - t0) * 1000
 
+        candidates_returned: Dict[str, Optional[int]] = {
+            "lexical": (
+                len(lexical_hits)
+                if effective in (RetrievalMode.LEXICAL, RetrievalMode.HYBRID)
+                else None
+            ),
+            "vector": (
+                len(vector_hits)
+                if effective in (RetrievalMode.VECTOR, RetrievalMode.HYBRID)
+                else None
+            ),
+        }
+
         if effective == RetrievalMode.HYBRID:
             if alpha == 1.0:
                 notes.append("alpha=1.0: lexical branch carries no weight")
@@ -221,6 +234,7 @@ class Retriever:
             timings,
             notes,
             candidate_k=pool,
+            candidates_returned=candidates_returned,
         )
 
     def _hydrate(self, candidates: Sequence[FusedCandidate], scope: QueryScope) -> List[SearchHit]:
