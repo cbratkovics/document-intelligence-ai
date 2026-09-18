@@ -1,0 +1,69 @@
+name: Deploy Space
+
+# Assembles the Hugging Face Space repository (Dockerfile, Space README,
+# source, requirements, sample corpus) and force-pushes it after CI passes
+# on main. The GitHub README is not deployed; the Space has its own.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-space
+  cancel-in-progress: false
+
+env:
+  HF_SPACE: cbratkovics/document-intelligence-ai
+
+jobs:
+  deploy:
+    name: Push to Hugging Face Space
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Assemble the Space repository
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/space"
+          mkdir -p "$RUNNER_TEMP/space/data"
+          cp -r src app scripts "$RUNNER_TEMP/space/"
+          cp -r data/samples "$RUNNER_TEMP/space/data/"
+          cp requirements-base.txt requirements-demo.txt "$RUNNER_TEMP/space/"
+          cp deploy/space/demo.env deploy/space/Dockerfile deploy/space/.dockerignore "$RUNNER_TEMP/space/"
+          cp deploy/space/README.md "$RUNNER_TEMP/space/README.md"
+          find "$RUNNER_TEMP/space" -type d -name __pycache__ -prune -exec rm -rf {} +
+          echo "Space contents:"
+          find "$RUNNER_TEMP/space" -type f | sed "s|$RUNNER_TEMP/space/||" | sort
+
+      - name: Refuse to deploy secrets or provider keys
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/space"
+          if grep -rIiE "(OPENAI_API_KEY|API_KEY)=[A-Za-z0-9]" demo.env Dockerfile; then
+            echo "A key value is present in the deploy directory; aborting."
+            exit 1
+          fi
+          grep -q "^GENERATION_PROVIDER=none$" demo.env
+          grep -q "^EMBEDDING_PROVIDER=fastembed$" demo.env
+
+      - name: Force-push to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$HF_TOKEN" || { echo "HF_TOKEN secret is not set"; exit 1; }
+          cd "$RUNNER_TEMP/space"
+          git init -q -b main
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Deploy ${GITHUB_SHA::12} from ${GITHUB_REPOSITORY}"
+          git push --force "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}" main
+          echo "Pushed to https://huggingface.co/spaces/${HF_SPACE}"
