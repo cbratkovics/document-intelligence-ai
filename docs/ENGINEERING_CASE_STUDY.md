@@ -13,9 +13,11 @@ resulting chunks, restrict a query to selected documents, and remove documents
 from every application-controlled store.
 
 The default path is deliberately credential-free. BM25 retrieval and evidence
-excerpts work without model downloads or provider keys. Dense retrieval,
-cross-encoder or LLM reranking, and generated answers are configuration-dependent
-capabilities and are not exercised by the default offline evaluation.
+excerpts work without model downloads or provider keys. Dense retrieval
+(OpenAI, sentence-transformers, or the credential-free `fastembed` ONNX
+provider that the public demo uses), cross-encoder or LLM reranking, and
+generated answers are configuration-dependent capabilities; the default
+offline evaluation exercises none of them.
 
 The design prioritizes these invariants:
 
@@ -36,7 +38,8 @@ and version metadata.
 ### Ingestion
 
 ```text
-bounded upload -> validate and extract -> chunk with source locations
+optional eviction when a document cap is configured -> bounded upload
+  -> validate and extract -> chunk with source locations
   -> manifest status=indexing -> optional vector write and verification
   -> manifest status=ready -> rebuild BM25 -> bump corpus generation
   -> clear answer cache
@@ -81,11 +84,17 @@ from the manifest and discards candidates that are missing, out of scope,
 non-ready, or not from the document's current version. This hydration step is a
 second defense against stale index entries.
 
-BM25 is always available. Requested hybrid retrieval falls back transparently
+BM25 is always available. It removes a short English stopword list from
+documents and queries, so a question made only of function words returns no
+lexical candidates instead of feeding noise into fusion. Requested hybrid
+retrieval falls back transparently
 to lexical retrieval when no embedding provider is configured and reports the
 effective mode. Vector-only retrieval instead returns a capability error.
 Hybrid mode uses reciprocal-rank fusion because lexical scores and cosine
-distance do not share a meaningful numeric scale.
+distance do not share a meaningful numeric scale. Each hit reports its lexical
+rank, vector rank, `fusion_rank` (position after fusion, before any
+reranking), and final rank separately, and the response reports
+`candidate_k`, the number of candidates requested from each branch.
 
 Answer context is assembled in rank order under a character budget and labels
 evidence `[S1]` through `[Sn]`. Generation is optional: without a provider the
@@ -118,6 +127,8 @@ it does not prove that every generated claim is entailed by its cited passage.
 | Request and response contracts | `src/api/schemas.py`, `src/api/endpoints.py` | `tests/test_api.py` |
 | Offline retrieval metrics and scenarios | `eval/retrieval_metrics.py`, `eval/run_eval.py` | `tests/test_eval_metrics.py`, sample-corpus evaluation |
 | Publication content policy | `scripts/check_publication.py` | `tests/test_publication.py`, CI publication check |
+| Public-demo controls: seeding, document cap and eviction, rate limits | `src/rag/service.py`, `src/api/ratelimit.py`, `src/api/main.py` | `tests/test_demo_controls.py` |
+| Demo configuration cannot reach a paid provider | `deploy/space/demo.env`, `src/core/embeddings.py` | `tests/test_demo_safety.py` (fastembed double, sockets blocked) |
 
 Failure-path tests cover staged-ingestion rollback, replacement failures,
 retryable deletion, stale candidates, empty and invalid scopes, unavailable or
@@ -161,6 +172,27 @@ pytest tests/test_lifecycle.py -q
 pytest tests/test_retrieval_generation.py -q
 ```
 
+`make demo-api` runs the same server in the public demo's configuration
+(hybrid retrieval with the ONNX model) once `init_models.py --fastembed` has
+prepared the model files.
+
+## Public demo
+
+The hosted demo at https://frontend-doc-intel.vercel.app is retrieval-only:
+`GENERATION_PROVIDER=none`, no provider SDK in the image, and
+`tests/test_demo_safety.py` proves no paid provider can be resolved even with
+a key in the environment. Dense retrieval uses the `fastembed` ONNX provider
+with model files downloaded at image build time. The API seeds
+`data/samples/` at startup and protects those documents from eviction;
+uploads count against a document cap and the oldest unprotected document is
+evicted first. Per-client and global sliding-window rate limits apply on
+`/api` routes; the forwarded client-IP header is trusted only on requests
+that carry the valid API key, so the frontend proxy's visitors are limited
+individually while anonymous callers share the socket-address bucket. The
+frontend keeps the ids it uploaded in browser session storage and scopes
+every search and listing to the seeded documents plus those ids; this is a
+convenience filter over one shared corpus, not tenant isolation.
+
 ## Evaluation procedure and measurement scope
 
 `python -m eval.run_eval --embedding none` ingests the small fictional sample
@@ -180,7 +212,8 @@ entailment labels, and separately reported operational measurements.
 
 Current operation is one process serving one corpus. BM25 is in memory, so
 multi-worker serving is unsupported; authentication is one optional shared API
-key, not tenant isolation. PDF ingestion requires a text layer. Citation checks
+key, not tenant isolation, and rate limiting is in-process state. PDF
+ingestion requires a text layer. Citation checks
 validate labels rather than factual entailment. Provider-side retention and
 external backups are outside application-controlled deletion.
 
@@ -202,7 +235,9 @@ implemented and verified:
 
 **Why retain lexical retrieval?** It is deterministic, credential-free, and
 effective for exact identifiers and policy terms. Dense retrieval is optional
-and useful for semantic similarity; hybrid mode combines their ranks.
+and useful for semantic similarity; hybrid mode combines their ranks. The
+demo's example questions show the split: exact identifiers favour BM25 and
+paraphrases of a document's wording favour the dense retriever.
 
 **Why can stale vectors not become answers?** Scope is applied during candidate
 generation and candidates are hydrated against ready, current manifest state.

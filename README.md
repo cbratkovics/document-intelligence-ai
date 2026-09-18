@@ -11,7 +11,7 @@ with a public demo that shows exactly why each passage was retrieved.
 > guarantees, scoped retrieval, implementation evidence, evaluation boundaries,
 > and a credential-free local walkthrough of the API.
 
-**Live demo:** _link added after the first Vercel deploy_ ·
+**Live demo:** [frontend-doc-intel.vercel.app](https://frontend-doc-intel.vercel.app) ·
 **API:** [huggingface.co/spaces/cbratkovics/document-intelligence-ai](https://huggingface.co/spaces/cbratkovics/document-intelligence-ai)
 
 ![Evidence view: the top passage with matched terms highlighted, then every retrieved chunk with its BM25, dense and fused rank side by side](docs/images/demo-hybrid.png)
