@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-We need to select a web framework for building the Document Intelligence API that can handle high-throughput document processing, provide excellent performance, and support modern API development practices.
+We need to select a web framework for building the Document Intelligence API for a single-process document API with typed request validation, generated OpenAPI documentation, and async request handling.
 
 ## Decision
 We will use FastAPI as our web framework.

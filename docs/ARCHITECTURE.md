@@ -31,16 +31,16 @@ reported by `/health` and `/ready`; it never silently falls back to memory.
 | `utils/document_loader.py` | Filename normalization, extension and content checks, UTF-8/UTF-16 decoding, PDF extraction with page spans, upload storage with server-generated names |
 | `core/chunking.py` | Character chunker preserving `[char_start, char_end)` offsets, page ranges, Markdown sections; bounded chunk counts; guaranteed progress |
 | `core/manifest.py` | SQLite schema and operations; corpus generation counter |
-| `core/embeddings.py` | `openai`, `local` (sentence-transformers, offline unless allowed), `hash` (test-only), `none` |
+| `core/embeddings.py` | `openai`, `local` (sentence-transformers, offline unless allowed), `fastembed` (ONNX Runtime, offline unless allowed), `hash` (test-only), `none` |
 | `core/vector_store.py` | Chroma wrapper: cosine space, embedding-identity metadata, scoped queries, paginated enumeration |
-| `core/lexical.py` | BM25 scorer (k1=1.5, b=0.75, Lucene IDF) and scoped in-memory index |
+| `core/lexical.py` | BM25 scorer (k1=1.5, b=0.75, Lucene IDF, English stopwords removed) and scoped in-memory index |
 | `rag/service.py` | Ingestion, replacement, deletion, consistency report |
 | `rag/hybrid_search.py` | Reciprocal rank fusion by chunk id with explicit weights |
 | `rag/reranker.py` | Heuristic, LLM, and cross-encoder reranking with failure status |
 | `rag/retriever.py` | Scope validation, mode resolution, candidate generation, hydration, reranking, truncation |
 | `rag/generator.py` | Context budgeting, grounded prompting, citation validation, streaming, summaries, LLM judge |
 | `rag/cache.py` | Bounded exact-match answer cache keyed by scope, corpus generation, and configuration |
-| `api/` | FastAPI app factory, routes, schemas, API-key dependency, health, static review UI |
+| `api/` | FastAPI app factory, routes, schemas, API-key dependency, rate limiter, health, static review UI |
 | `monitoring/metrics.py` | Optional Prometheus metrics with route-template labels |
 
 ## Data lifecycle invariants
@@ -82,6 +82,9 @@ reported by `/health` and `/ready`; it never silently falls back to memory.
 
 - `lexical`: BM25 over every ready chunk. Scope filters candidates before
   ranking; corpus statistics are corpus-wide (single-corpus isolation model).
+  A short English stopword list is removed from documents and queries, so a
+  question made only of function words yields no lexical hits instead of
+  feeding noise into fusion (`tests/test_indexes.py`).
 - `vector`: cosine distance from Chroma; `vector_similarity = 1 - distance`
   is valid only because the collection is created with `hnsw:space=cosine`.
 - `hybrid`: RRF with `score = sum(weight / (rrf_k + rank))`, `rrf_k=60`,
@@ -95,8 +98,12 @@ reported by `/health` and `/ready`; it never silently falls back to memory.
   (original order kept, error reported). Failed LLM scores are never
   replaced with defaults.
 - Every hit carries `vector_distance`, `vector_similarity`, `vector_rank`,
-  `lexical_score`, `lexical_rank`, `fusion_score`, `rerank_score` separately.
-  None of them is calibrated relevance or answer confidence.
+  `lexical_score`, `lexical_rank`, `fusion_score`, `fusion_rank` (position
+  after fusion, before any reranking; hybrid only), `rerank_score` and the
+  final `rank` separately. The response reports `candidate_k`, the number of
+  candidates requested from each branch, so a missing branch rank can be read
+  as "outside the top `candidate_k`". None of these is calibrated relevance
+  or answer confidence.
 - Requested `hybrid` without an embedding provider runs lexical-only and
   reports `mode_effective=lexical` with a note; requested `vector` returns 409.
 
@@ -126,6 +133,46 @@ reported by `/health` and `/ready`; it never silently falls back to memory.
   and report coverage; they never use similarity search.
 - The `/evaluate/judge` endpoint is an LLM rating with disclosed model and
   prompt version; parse failures are reported as `parse_failed`, not scored.
+
+## Public-demo controls
+
+All optional and off by default (`tests/test_demo_controls.py`):
+
+- `DEMO_SEED_DIR`: files ingested in the lifespan handler after the services
+  start. Their ids are protected from eviction and reported by `/health`.
+  Failures are reported in `/health.seed_errors`, never raised.
+- `MAX_DOCUMENTS`: before a new document is staged, the oldest unprotected
+  documents (by `created_at`, microsecond precision) are deleted through the
+  normal deletion path until one more fits. Uploads report `evicted`. When
+  only protected documents remain the upload fails with 409 `corpus_full`.
+- `RATE_LIMIT_PER_MINUTE` and `RATE_LIMIT_GLOBAL_PER_MINUTE`: sliding
+  60-second windows enforced by middleware on `/api` paths, returning 429
+  with `Retry-After`. The per-client key is the socket address, or the value
+  of `CLIENT_IP_HEADER` when the request carries a valid API key.
+- `/health` states the effective retrieval mode, embedding model, reranker,
+  generation provider, ready document count and seeded ids so a client can
+  label itself truthfully.
+- Ephemeral services drop their Chroma collection on close; the embedded
+  ephemeral client is process-global and would otherwise leak state across
+  service instances in one process.
+
+## Public demo deployment
+
+`deploy/space/` holds the Hugging Face Space image and `demo.env`, the
+runtime configuration: ephemeral storage, `EMBEDDING_PROVIDER=fastembed`
+(MiniLM through ONNX Runtime, model downloaded at image build time and
+offline afterwards), `GENERATION_PROVIDER=none`, heuristic reranker on
+request, seeded samples from `data/samples/`, 4 MiB uploads, a 24-document
+cap and rate limits. No provider SDK is installed in the image.
+`tests/test_demo_safety.py` loads `demo.env` with a fake `OPENAI_API_KEY`
+present and proves the stack starts, seeds, and answers hybrid queries with
+every socket blocked and `openai` unimportable.
+
+`frontend/` is the Next.js page deployed on Vercel. Its route handlers hold
+the API key, expose only health, search, upload, document list and document
+chunks, forward the visitor address as `X-Client-IP`, and scope every request
+to the seeded documents plus the ids the browser uploaded. The Space is
+deployed by `.github/workflows/deploy-space.yml` after CI succeeds on `main`.
 
 ## Access control and limits
 
@@ -169,5 +216,9 @@ exception: `RERANKER_MODE=cross_encoder` lazily loads
 - No OCR, DOCX, or HTML ingestion.
 - Structural citation validation only; no entailment check.
 - No multi-process or multi-tenant support.
-- The transformer cross-encoder and local embeddings are not exercised in CI
-  (they need prepared model files).
+- The transformer cross-encoder, sentence-transformers embeddings and the
+  real fastembed model are not exercised in CI (they need prepared model
+  files); fastembed plumbing is tested through a double.
+- sentence-transformers 2.2.x needs `huggingface_hub<0.26`; the pin is in
+  `requirements-ml.txt`. Its cache is `SENTENCE_TRANSFORMERS_HOME`, not
+  `HF_HOME`.

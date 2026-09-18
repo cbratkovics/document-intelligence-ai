@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased (0.3.0): public retrieval demo
+
+- `fastembed` embedding provider (ONNX MiniLM, no torch); `init_models.py
+  --fastembed`; `requirements-demo.txt`; `huggingface_hub<0.26` pinned for
+  the sentence-transformers path.
+- Hits carry `fusion_rank`; retrieval reports `candidate_k`; `/health`
+  reports effective modes, document count and seeded ids.
+- Public-demo controls: startup seeding, document cap with oldest-first
+  eviction, per-client and global rate limits with forwarded-IP trust only
+  behind a valid key.
+- BM25 removes English stopwords from documents and queries.
+- Ephemeral services drop their Chroma collection on close; manifest
+  timestamps use microsecond precision.
+- `deploy/space/` (Hugging Face Space image and configuration), the deploy
+  workflow, and `frontend/` (Next.js evidence view on Vercel).
+- README rewritten around the deployed demo; repository description and
+  topics corrected.
+
 ## Unreleased (0.2.0)
 
 Repair-and-polish pass focused on correctness, honesty, and reproducible

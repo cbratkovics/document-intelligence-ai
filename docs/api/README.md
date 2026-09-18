@@ -16,9 +16,10 @@ returns 403. Health endpoints never require a key.
 Errors are JSON objects `{"error": "...", "code": "...", "request_id": "..."}`.
 Status codes are preserved: 400 invalid input, 401 missing/invalid key, 403
 operation unavailable, 404 unknown document, 409 mode or document not
-available, 413 upload too large, 422 schema validation (unknown fields are
-rejected), 500 internal or incomplete operation, 502 generation provider
-failure, 503 service not started.
+available (or `corpus_full` when the document cap is reached and nothing can
+be evicted), 413 upload too large, 422 schema validation (unknown fields are
+rejected), 429 rate limited (with `Retry-After`), 500 internal or incomplete
+operation, 502 generation provider failure, 503 service not started.
 
 ## Documents
 
@@ -38,7 +39,8 @@ as `doc_id` are rejected). Returns after every index write has succeeded.
 ```
 
 Uploading identical bytes again returns the existing document with
-`created=false` and `duplicate_of` set.
+`created=false` and `duplicate_of` set. When `MAX_DOCUMENTS` is configured,
+`evicted` lists the ids removed (oldest first) to make room.
 
 ### `POST /api/v1/documents/{doc_id}/replace`
 
@@ -91,10 +93,12 @@ reports how much of the document fit the context budget.
 Response: `results` (each with `chunk_id`, `doc_id`, `version`, `ordinal`,
 `filename`, `text`, `location`, `metadata`, `scores` with separate
 `vector_distance`, `vector_similarity`, `vector_rank`, `lexical_score`,
-`lexical_rank`, `fusion_score`, `rerank_score`, and `rank`), plus
-`mode_requested`, `mode_effective`, `rerank_status`
-(`applied`/`disabled`/`unavailable`/`failed`), `reranker`, `scope`,
-`corpus_generation`, `timings_ms`, `notes`.
+`lexical_rank`, `fusion_score`, `fusion_rank` (hybrid only, before
+reranking), `rerank_score`, and `rank`), plus `mode_requested`,
+`mode_effective`, `rerank_status` (`applied`/`disabled`/`unavailable`/`failed`),
+`reranker`, `scope`, `corpus_generation`, `candidate_k` (candidates requested
+per branch; a null branch rank means outside that top list), `timings_ms`,
+`notes`.
 
 ## Question answering
 
@@ -138,9 +142,12 @@ prompt version. `status` is `ok`, `parse_failed`, `provider_error`, or
 
 ## Health
 
-- `GET /health`: liveness plus capabilities (storage mode, embedding provider
-  and identity, dense availability, reranker mode, generation provider, auth
-  mode) and any startup error.
+- `GET /health`: liveness plus the effective `retrieval_mode`,
+  `embedding_provider`, `embedding_model`, `reranker_mode`,
+  `generation_provider`, `document_count` (ready documents),
+  `seeded_doc_ids`, `seed_errors`, capabilities (storage mode, embedding
+  identity, supported extensions, upload and document limits) and any
+  startup error. Never requires a key and is never rate limited.
 - `GET /ready`: 200 when storage is reachable and the indexes agree with the
   manifest; 503 otherwise.
 - `GET /api/v1/system/stats`: counts and a consistency report.

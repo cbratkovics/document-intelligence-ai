@@ -27,9 +27,25 @@ issues for vulnerabilities.
   not include document contents or query text by default.
 - Metadata is restricted to flat scalar values; reserved keys are rejected.
 
+- Optional in-process rate limiting on `/api` routes: a per-client and a
+  global sliding-window ceiling. The forwarded client-IP header is trusted
+  only on requests that carry a valid `API_KEY`; anonymous callers are keyed
+  by socket address, so the header cannot be spoofed to escape the limit.
+- Optional startup seeding and a document cap with oldest-first eviction for
+  public deployments; seeded documents are never evicted.
+
+## Public demo
+
+The demo frontend proxies a fixed allowlist of routes (health, search, upload,
+document list, document chunks) and holds the API key server-side. It filters
+the shared corpus to the seeded samples plus ids the browser uploaded. That
+filter is a courtesy, not a security boundary: anyone holding the API key can
+read every document, and uploads should be treated as public.
+
 ## What it does not do
 
-- No rate limiting, encryption at rest, RBAC, SSO, or audit log.
+- No encryption at rest, RBAC, SSO, or audit log. Rate limiting resets with
+  the process.
 - Deletion removes application-controlled data only.
 - Dependencies are pinned but not continuously monitored beyond the CI
   Trivy scan (advisory) and verified-secret scan (enforced).
