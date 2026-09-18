@@ -25,6 +25,10 @@ with tests skipped.
 
 ## Error codes you will see
 
+- DQ-E417 Freshness threshold exceeded. This error code means the freshness
+  monitor found that a table's newest row is older than the threshold agreed
+  with its consumers, so the snapshot is held at the gate. Action: identify
+  which upstream load stalled before rerunning anything.
 - PIPE-118 Late-arriving source file. The ads spend export has not landed by
   its deadline. The job waits up to 45 minutes, then continues without it and
   marks `fct_acquisition_daily` as partial. Action: none at night; the file
@@ -35,8 +39,6 @@ with tests skipped.
 - PIPE-503 Warehouse connection pool exhausted. Too many concurrent model
   builds. Action: rerun the dbt step with `--threads 4`; if it recurs three
   nights running, open a capacity ticket.
-- DQ-E417 Freshness threshold exceeded. See the gate section. Action:
-  identify which upstream load stalled before rerunning anything.
 - DQ-E205 Schema drift detected. The pre-load check found new, removed, or
   retyped columns. Action: same as PIPE-410.
 

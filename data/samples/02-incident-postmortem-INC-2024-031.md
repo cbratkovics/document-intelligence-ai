@@ -27,8 +27,8 @@ flat morning and a sudden catch-up spike once the load was repaired.
   (freshness threshold exceeded: 65 minutes against a 60 minute threshold).
   The alert posted to `#dp-alerts-legacy`, a channel muted since the
   monitoring migration two weeks earlier.
-- 03:06 to 21:15 DQ-E417 fired every hour. JOB-4410 retried and failed with
-  the same error on each run.
+- 03:06 to 21:15 The freshness alert fired every hour. JOB-4410 retried and
+  failed the same way on each run.
 - 20:50 A finance analyst noticed that gross merchandise value for the day
   had not moved since morning and asked in the support channel.
 - 21:15 On-call confirmed the failing job, replaced `SELECT *` with an
@@ -41,7 +41,8 @@ flat morning and a sudden catch-up spike once the load was repaired.
 Two independent faults combined. First, the staging load relied on positional
 column matching, so an additive, backwards-compatible change upstream became a
 hard failure downstream. Second, the freshness alert existed and worked, but
-its destination was a muted channel, so the signal never reached a person.
+its destination was a muted channel, so nobody noticed it: the signal never
+reached a person during the incident.
 Neither fault alone would have produced a nineteen hour outage.
 
 ## What went well
@@ -60,6 +61,8 @@ Neither fault alone would have produced a nineteen hour outage.
 
 ## Action items
 
+The action items from INC-2024-031, each with an owner and a status:
+
 - AI-031-1 Replace every `SELECT *` load in the storefront pipeline with an
   explicit column list. Owner: Data Platform. Done.
 - AI-031-2 Add a schema drift check (DQ-E205) that compares the raw table's
@@ -76,6 +79,6 @@ Neither fault alone would have produced a nineteen hour outage.
 
 ## Lessons
 
-An alert that nobody receives is the same as no alert. Detection was fine;
+A signal that reaches no one is the same as no signal. Detection was fine;
 delivery failed. The fix is not more monitors but a periodic proof that the
 existing ones reach someone who will act.

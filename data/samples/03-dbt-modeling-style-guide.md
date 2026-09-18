@@ -5,7 +5,8 @@ company. This guide governs the `ferrowind_warehouse` dbt project.
 
 ## Layers and prefixes
 
-Models live in four layers. The prefix is mandatory and the folder must match.
+Models are organised in four layers. The prefix is mandatory and the folder
+must match.
 
 | Layer | Prefix | Folder | Purpose |
 |---|---|---|---|
@@ -30,9 +31,10 @@ not belong in staging.
 
 Intermediate models hold the joins and derivations that more than one mart
 needs. They are not exposed to dashboards and carry no service level
-objective. Business rules that define a metric belong in intermediate or
-mart models, next to the tests that prove them, and must cite the metric
-identifier from the metric definitions guide in the model description.
+objective. This is where business logic should live: the rules that define a
+metric belong in intermediate or mart models, next to the tests that prove
+them, citing the metric identifier from the metric definitions guide in the
+model description.
 
 Mart models are the only models dashboards may read. Every mart model has a
 declared grain in its description ("one row per order per day"), a primary

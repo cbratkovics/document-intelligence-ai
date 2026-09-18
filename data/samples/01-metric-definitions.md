@@ -36,12 +36,11 @@ finance close process relies on this property; do not backdate refunds.
 Owner: Growth Analytics. Source: `mart_growth.dim_buyers`, flag
 `is_repeat_buyer`.
 
-A buyer account is a repeat buyer when it has at least two delivered orders
-within the trailing 365 days, counted at the evaluation date. Cancelled and
-refunded orders do not count. Guest checkouts are matched to an account by
-verified email before evaluation; unmatched guest orders never contribute.
-The flag is recomputed nightly, so a buyer can lose repeat status when an
-old order ages out of the window.
+A repeat buyer is a buyer who comes back: a buyer account with at least two
+delivered orders within the trailing 365 days, counted at the evaluation
+date. Cancelled and refunded orders do not count. Guest checkouts are matched
+to an account by verified email before evaluation; unmatched guest orders
+never contribute. The flag is recomputed nightly.
 
 ## MTR-012 Order defect rate
 
