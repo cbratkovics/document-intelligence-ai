@@ -56,6 +56,29 @@ jobs:
           name: eval-results
           path: eval/results/ci-*.json
 
+  frontend:
+    name: Frontend build (clean checkout)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # A clean checkout contains only tracked files, so a directory that is
+      # ignored locally (frontend/lib was, via the Python "lib/" rule) fails
+      # here instead of on the hosting platform.
+      - name: Install exactly the lockfile
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build
+
   docker:
     name: Docker image smoke test
     runs-on: ubuntu-latest

@@ -1,8 +1,10 @@
 name: Deploy Space
 
 # Assembles the Hugging Face Space repository (Dockerfile, Space README,
-# source, requirements, sample corpus) and force-pushes it after CI passes
-# on main. The GitHub README is not deployed; the Space has its own.
+# source, requirements, sample corpus) and force-pushes it after the CI
+# workflow succeeds on main. CI succeeds only when every job in it passes,
+# including the clean-checkout frontend build, so a broken frontend blocks
+# the Space deploy as well. The GitHub README is not deployed.
 
 on:
   workflow_run:
