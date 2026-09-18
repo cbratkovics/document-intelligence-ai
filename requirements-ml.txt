@@ -7,6 +7,7 @@ openai==1.6.1
 # Local embeddings and the transformer cross-encoder reranker
 # (models must be prepared with scripts/setup/init_models.py; no download at runtime)
 sentence-transformers==2.2.2
+huggingface_hub<0.26   # 0.26 removed cached_download, which sentence-transformers 2.2.x imports
 torch>=2.0,<2.3
 transformers>=4.30,<4.40
 

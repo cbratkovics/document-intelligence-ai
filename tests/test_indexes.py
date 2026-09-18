@@ -67,6 +67,23 @@ def test_manifest_roundtrip_and_active_chunks_exclude_non_ready(tmp_path):
     reopened.close()
 
 
+def test_stopwords_never_produce_lexical_hits():
+    index = LexicalIndex()
+    index.rebuild(
+        [
+            LexicalEntry("c1", "d1", "What is the plan for the day? It is what it is."),
+            LexicalEntry("c2", "d2", "An approved refund is issued within 5 business days."),
+        ],
+        generation=1,
+    )
+    assert tokenize("What does the refund take?") == ["refund", "take"]
+    # A question made only of function words matches nothing, so fusion sees no noise.
+    assert index.search("what is it", 10) == []
+    # Function words in a document do not let it outrank the content match.
+    hits = index.search("what is the refund", 10)
+    assert [h.chunk_id for h in hits] == ["c2"]
+
+
 def test_bm25_positive_scores_on_tiny_corpora_and_scoping():
     single = BM25([tokenize("refunds are issued within 14 days")])
     assert single.scores(tokenize("refund days"))[0] > 0

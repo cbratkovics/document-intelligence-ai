@@ -74,6 +74,10 @@ class UploadResponse(BaseModel):
     duplicate_of: Optional[str] = None
     warnings: List[str] = Field(default_factory=list)
     timings_ms: Dict[str, float] = Field(default_factory=dict)
+    evicted: List[str] = Field(
+        default_factory=list,
+        description="Documents removed (oldest first) to stay within MAX_DOCUMENTS",
+    )
 
 
 class DeleteResponse(BaseModel):

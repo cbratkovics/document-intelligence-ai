@@ -121,6 +121,13 @@ class VectorStore:
         self._client.delete_collection(self.collection_name)
         self._collection = self._open_collection()
 
+    def drop(self) -> None:
+        """Delete the collection without recreating it (ephemeral shutdown)."""
+        try:
+            self._client.delete_collection(self.collection_name)
+        except Exception as exc:  # pragma: no cover - best effort at shutdown
+            logger.warning("Could not drop vector collection: %s", exc)
+
     # -- reads -------------------------------------------------------------
     def count(self) -> int:
         return int(self._collection.count())

@@ -6,6 +6,9 @@ imports a provider SDK, opens a connection, or loads a model.
 - ``openai``: OpenAI embeddings API (paid; requires ``OPENAI_API_KEY``).
 - ``local``: sentence-transformers model loaded from the local cache. Downloads
   are refused unless ``ALLOW_MODEL_DOWNLOAD=true``.
+- ``fastembed``: the same MiniLM family through ONNX Runtime (no torch). Model
+  files come from the fastembed cache; downloads are refused unless
+  ``ALLOW_MODEL_DOWNLOAD=true``.
 - ``hash``: deterministic hashed bag-of-words vectors. Test-only: proves the
   vector plumbing but carries no semantic signal.
 - ``none``: dense retrieval disabled; the system runs lexical-only.
@@ -154,6 +157,61 @@ class LocalEmbeddings:
         return self.embed_documents([text])[0]
 
 
+class FastEmbedEmbeddings:
+    """ONNX Runtime embeddings via ``fastembed`` (imported lazily).
+
+    The model must already be present in ``cache_dir`` (prepare it with
+    ``scripts/setup/init_models.py --fastembed``) unless downloads are allowed.
+    """
+
+    semantic = True
+
+    def __init__(
+        self,
+        model_name: str,
+        cache_dir: Optional[str],
+        allow_download: bool,
+        model_factory=None,
+    ):
+        self.identity = f"fastembed:{model_name}"
+        self.model_name = model_name
+        if not allow_download:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        if model_factory is None:
+            try:
+                from fastembed import TextEmbedding
+            except ImportError as exc:
+                raise RuntimeError(
+                    "fastembed is required for embedding_provider=fastembed "
+                    "(pip install -r requirements-demo.txt)"
+                ) from exc
+            model_factory = TextEmbedding
+        kwargs: dict = {"local_files_only": not allow_download}
+        if cache_dir:
+            kwargs["cache_dir"] = cache_dir
+        try:
+            self._model = model_factory(model_name, **kwargs)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not load fastembed model '{model_name}'. Prepare it with "
+                "`python scripts/setup/init_models.py --fastembed` or set "
+                "ALLOW_MODEL_DOWNLOAD=true."
+            ) from exc
+        self.dimension = len(self.embed_query("dimension probe"))
+
+    def embed_documents(self, texts: Sequence[str]) -> List[List[float]]:
+        batch = [t if t.strip() else " " for t in texts]
+        if not batch:
+            return []
+        vectors = [list(map(float, v)) for v in self._model.embed(batch)]
+        if len(vectors) != len(batch):
+            raise RuntimeError("fastembed returned an unexpected number of vectors")
+        return vectors
+
+    def embed_query(self, text: str) -> List[float]:
+        return self.embed_documents([text])[0]
+
+
 def build_embedding_provider(settings: Settings) -> Optional[EmbeddingProvider]:
     """Instantiate the configured provider, or ``None`` for lexical-only mode."""
     name = settings.resolved_embedding_provider
@@ -171,6 +229,12 @@ def build_embedding_provider(settings: Settings) -> Optional[EmbeddingProvider]:
     if name == "local":
         return LocalEmbeddings(
             settings.local_embedding_model, allow_download=settings.allow_model_download
+        )
+    if name == "fastembed":
+        return FastEmbedEmbeddings(
+            settings.fastembed_model,
+            cache_dir=settings.fastembed_cache_dir,
+            allow_download=settings.allow_model_download,
         )
     raise ValueError(f"Unknown embedding provider: {name}")
 

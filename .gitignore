@@ -52,6 +52,8 @@ data/*
 !data/uploads/.gitkeep
 !data/models/.gitkeep
 !data/cache/.gitkeep
+!data/samples/
+!data/samples/**
 logs/
 *.log
 

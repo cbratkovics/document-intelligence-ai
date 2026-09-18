@@ -65,7 +65,8 @@ CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id, version, ordinal);
 
 
 def utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Microsecond precision so "oldest first" ordering is stable within a second.
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def make_chunk_id(doc_id: str, version: int, ordinal: int) -> str:

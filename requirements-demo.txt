@@ -1,0 +1,5 @@
+# Public demo runtime: core requirements plus ONNX embeddings (no torch, no
+# provider SDKs). Used by deploy/space/Dockerfile.
+-r requirements-base.txt
+
+fastembed==0.8.0

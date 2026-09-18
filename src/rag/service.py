@@ -19,7 +19,8 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
 
 from ..core.chunking import Chunk, chunk_text
 from ..core.config import Settings
@@ -29,6 +30,7 @@ from ..core.manifest import Manifest, make_chunk_id, utcnow_iso
 from ..core.types import ChunkRecord, DocumentRecord, DocumentStatus, IngestionError, NotFoundError
 from ..core.vector_store import VectorStore
 from ..utils.document_loader import (
+    SUPPORTED_EXTENSIONS,
     UploadStorage,
     content_hash,
     detect_extension,
@@ -96,6 +98,13 @@ class IngestResult:
     duplicate_of: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
     timings_ms: Dict[str, float] = field(default_factory=dict)
+    evicted: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SeedResult:
+    doc_ids: List[str]
+    errors: List[str]
 
 
 @dataclass
@@ -126,6 +135,8 @@ class DocumentService:
         self.embedder = embedder
         self.vector_store = vector_store
         self._write_lock = asyncio.Lock()
+        # Documents ingested at startup from ``demo_seed_dir``; never evicted.
+        self.protected_doc_ids: Set[str] = set()
         self.rebuild_lexical()
 
     # -- construction ------------------------------------------------------
@@ -159,6 +170,10 @@ class DocumentService:
         )
 
     def close(self) -> None:
+        if self.manifest.path is None and self.vector_store is not None:
+            # Ephemeral Chroma clients share process-wide state; an ephemeral
+            # corpus must not outlive the service that owns it.
+            self.vector_store.drop()
         self.manifest.close()
 
     # -- capabilities --------------------------------------------------------
@@ -178,7 +193,9 @@ class DocumentService:
             "reranker_mode": self.settings.reranker_mode,
             "generation_provider": self.settings.resolved_generation_provider,
             "chunking_config": self.settings.chunking_config_id,
-            "supported_extensions": [".txt", ".md", ".rst", ".pdf"],
+            "supported_extensions": sorted(SUPPORTED_EXTENSIONS),
+            "max_upload_size": self.settings.max_upload_size,
+            "max_documents": self.settings.max_documents,
         }
 
     def stats(self) -> Dict[str, Any]:
@@ -260,6 +277,10 @@ class DocumentService:
                     if candidate.status in (DocumentStatus.FAILED, DocumentStatus.INDEXING):
                         existing = candidate  # retry under the same identity
                         break
+
+            evicted: List[str] = []
+            if existing is None and settings.max_documents > 0:
+                evicted = await self._make_room_locked(settings.max_documents)
 
             timings: Dict[str, float] = {}
             t0 = time.perf_counter()
@@ -395,8 +416,64 @@ class DocumentService:
                 len(chunk_records),
             )
             return IngestResult(
-                record, created=True, warnings=extracted.warnings, timings_ms=timings
+                record,
+                created=True,
+                warnings=extracted.warnings,
+                timings_ms=timings,
+                evicted=evicted,
             )
+
+    async def _make_room_locked(self, max_documents: int) -> List[str]:
+        """Evict the oldest unprotected documents until one more fits. Caller holds the lock."""
+        evicted: List[str] = []
+        while True:
+            docs = self.list_documents()
+            if len(docs) < max_documents:
+                return evicted
+            candidates = sorted(
+                (d for d in docs if d.doc_id not in self.protected_doc_ids),
+                key=lambda d: (d.created_at, d.doc_id),
+            )
+            if not candidates:
+                raise IngestionError(
+                    f"The corpus holds its maximum of {max_documents} documents and none "
+                    "can be evicted",
+                    code="corpus_full",
+                    status=409,
+                )
+            victim = candidates[0]
+            await self._delete_document_locked(victim.doc_id)
+            logger.info(
+                "Evicted %s (%s) to stay within max_documents",
+                victim.doc_id,
+                victim.display_filename,
+            )
+            evicted.append(victim.doc_id)
+
+    # -- seeding ----------------------------------------------------------------
+    async def seed_directory(self, directory: Path) -> SeedResult:
+        """Ingest every supported file in ``directory`` (sorted) and protect the results.
+
+        Files that fail to ingest are reported, not raised, so one bad sample
+        does not take the whole service down. Re-running on a persistent
+        corpus is idempotent: identical bytes resolve to the existing record.
+        """
+        directory = Path(directory)
+        doc_ids: List[str] = []
+        errors: List[str] = []
+        if not directory.is_dir():
+            return SeedResult([], [f"seed directory not found: {directory}"])
+        for path in sorted(directory.iterdir()):
+            if not path.is_file() or path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                continue
+            try:
+                result = await self.ingest(path.name, path.read_bytes())
+            except Exception as exc:
+                errors.append(f"{path.name}: {exc}")
+                continue
+            doc_ids.append(result.record.doc_id)
+            self.protected_doc_ids.add(result.record.doc_id)
+        return SeedResult(doc_ids, errors)
 
     def _rollback_version(self, doc_id: str, version: int, storage_name: Optional[str]) -> None:
         try:
@@ -437,37 +514,39 @@ class DocumentService:
     # -- deletion -------------------------------------------------------------
     async def delete_document(self, doc_id: str) -> DeleteResult:
         async with self._write_lock:
-            record = self.manifest.get_document(doc_id)
-            if record is None:
-                raise NotFoundError(doc_id)
-            # Mark first so retrieval excludes the document even if a later step fails.
-            self.manifest.set_status(doc_id, DocumentStatus.DELETED)
-            self.answer_cache.clear()
-            removed_vectors = 0
-            try:
-                if self.vector_store is not None:
-                    removed_vectors = await asyncio.to_thread(
-                        self.vector_store.delete_document, doc_id
-                    )
-                    remaining = self.vector_store.ids_for_document(doc_id)
-                    if remaining:
-                        raise RuntimeError(f"{len(remaining)} vectors still present")
-            except Exception as exc:
-                self.manifest.set_status(
-                    doc_id, DocumentStatus.DELETED, error=f"vector deletion incomplete: {exc}"
-                )
-                self._commit_corpus_change()
-                raise IngestionError(
-                    "Deletion incomplete: vector index removal failed; retry the request",
-                    code="deletion_incomplete",
-                    status=500,
-                ) from exc
-            removed_chunks = self.manifest.delete_chunks(doc_id)
-            file_removed = self.storage.delete(record.storage_name)
-            self.manifest.delete_document_rows(doc_id)
+            return await self._delete_document_locked(doc_id)
+
+    async def _delete_document_locked(self, doc_id: str) -> DeleteResult:
+        record = self.manifest.get_document(doc_id)
+        if record is None:
+            raise NotFoundError(doc_id)
+        # Mark first so retrieval excludes the document even if a later step fails.
+        self.manifest.set_status(doc_id, DocumentStatus.DELETED)
+        self.answer_cache.clear()
+        removed_vectors = 0
+        try:
+            if self.vector_store is not None:
+                removed_vectors = await asyncio.to_thread(self.vector_store.delete_document, doc_id)
+                remaining = self.vector_store.ids_for_document(doc_id)
+                if remaining:
+                    raise RuntimeError(f"{len(remaining)} vectors still present")
+        except Exception as exc:
+            self.manifest.set_status(
+                doc_id, DocumentStatus.DELETED, error=f"vector deletion incomplete: {exc}"
+            )
             self._commit_corpus_change()
-            logger.info("Deleted document %s (%d chunks)", doc_id, removed_chunks)
-            return DeleteResult(doc_id, removed_chunks, removed_vectors, file_removed)
+            raise IngestionError(
+                "Deletion incomplete: vector index removal failed; retry the request",
+                code="deletion_incomplete",
+                status=500,
+            ) from exc
+        removed_chunks = self.manifest.delete_chunks(doc_id)
+        file_removed = self.storage.delete(record.storage_name)
+        self.manifest.delete_document_rows(doc_id)
+        self.protected_doc_ids.discard(doc_id)
+        self._commit_corpus_change()
+        logger.info("Deleted document %s (%d chunks)", doc_id, removed_chunks)
+        return DeleteResult(doc_id, removed_chunks, removed_vectors, file_removed)
 
     async def clear_all(self) -> int:
         async with self._write_lock:
@@ -480,6 +559,7 @@ class DocumentService:
             for record in records:
                 self.storage.delete(record.storage_name)
             self.manifest.clear()
+            self.protected_doc_ids.clear()
             self._commit_corpus_change()
             return len(records)
 

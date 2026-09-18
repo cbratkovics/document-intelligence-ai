@@ -28,6 +28,7 @@ from ..rag.retriever import RetrievalRequestError, Retriever
 from ..rag.service import DocumentService
 from .endpoints import router
 from .health import router as health_router
+from .ratelimit import SlidingWindowLimiter, client_identity
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +75,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         app.state.service = None
         app.state.generator = None
         app.state.startup_error = None
+        app.state.seeded_doc_ids = []
+        app.state.seed_errors = []
         try:
             service, generator = build_services(settings)
             app.state.service = service
             app.state.generator = generator
+            if settings.demo_seed_dir:
+                seeded = await service.seed_directory(Path(settings.demo_seed_dir))
+                app.state.seeded_doc_ids = seeded.doc_ids
+                app.state.seed_errors = seeded.errors
+                for error in seeded.errors:
+                    logger.error("Seed document skipped: %s", error)
+                logger.info(
+                    "Seeded %d document(s) from %s", len(seeded.doc_ids), settings.demo_seed_dir
+                )
             metrics.initialize_metrics(
                 settings.app_version,
                 settings.app_env,
@@ -132,6 +144,29 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     app.include_router(router, prefix="/api/v1")
     app.include_router(health_router)
+
+    limiter = SlidingWindowLimiter(
+        settings.rate_limit_per_minute, settings.rate_limit_global_per_minute
+    )
+    app.state.limiter = limiter
+
+    if limiter.enabled:
+
+        @app.middleware("http")
+        async def rate_limit(request: Request, call_next):
+            if request.url.path.startswith("/api/"):
+                retry_after = limiter.check(client_identity(request, settings))
+                if retry_after is not None:
+                    return JSONResponse(
+                        status_code=429,
+                        content={
+                            "error": "Rate limit exceeded; retry later",
+                            "code": "rate_limited",
+                            "request_id": getattr(request.state, "request_id", None),
+                        },
+                        headers={"Retry-After": str(retry_after)},
+                    )
+            return await call_next(request)
 
     if settings.metrics_enabled and metrics.AVAILABLE:
         from prometheus_client import CONTENT_TYPE_LATEST, generate_latest

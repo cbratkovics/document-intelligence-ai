@@ -72,6 +72,7 @@ def _upload_response(result) -> UploadResponse:
         duplicate_of=result.duplicate_of,
         warnings=result.warnings,
         timings_ms={k: round(v, 2) for k, v in result.timings_ms.items()},
+        evicted=result.evicted,
     )
 
 

@@ -125,7 +125,16 @@ class Retriever:
         if scope.is_empty:
             notes.append("empty document scope; nothing searched")
             return RetrievalResult(
-                [], mode, effective, RerankStatus.DISABLED, None, scope, generation, timings, notes
+                [],
+                mode,
+                effective,
+                RerankStatus.DISABLED,
+                None,
+                scope,
+                generation,
+                timings,
+                notes,
+                candidate_k=pool,
             )
 
         lexical_hits: List[LexicalHit] = []
@@ -170,6 +179,9 @@ class Retriever:
             ]
 
         hits = self._hydrate(fused, scope)
+        if effective == RetrievalMode.HYBRID:
+            for position, hit in enumerate(hits, start=1):
+                hit.fusion_rank = position
         if self.settings.min_similarity is not None and effective == RetrievalMode.VECTOR:
             hits = [
                 h
@@ -199,7 +211,16 @@ class Retriever:
         for rank, hit in enumerate(hits, start=1):
             hit.final_rank = rank
         return RetrievalResult(
-            hits, mode, effective, rerank_status, reranker_name, scope, generation, timings, notes
+            hits,
+            mode,
+            effective,
+            rerank_status,
+            reranker_name,
+            scope,
+            generation,
+            timings,
+            notes,
+            candidate_k=pool,
         )
 
     def _hydrate(self, candidates: Sequence[FusedCandidate], scope: QueryScope) -> List[SearchHit]:

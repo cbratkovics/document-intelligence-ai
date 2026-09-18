@@ -16,7 +16,7 @@ from typing import List, Literal, Optional
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-EmbeddingProviderName = Literal["auto", "none", "openai", "local", "hash"]
+EmbeddingProviderName = Literal["auto", "none", "openai", "local", "fastembed", "hash"]
 GenerationProviderName = Literal["auto", "none", "openai"]
 RerankerMode = Literal["none", "heuristic", "cross_encoder", "llm"]
 StorageMode = Literal["persistent", "ephemeral"]
@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_timeout_seconds: float = 60.0
     local_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # ``fastembed`` runs the same MiniLM model through ONNX Runtime (no torch).
+    fastembed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    fastembed_cache_dir: Optional[str] = None
     allow_model_download: bool = False
 
     # Generation
@@ -81,6 +84,12 @@ class Settings(BaseSettings):
 
     # Ingestion limits
     max_upload_size: int = 10 * 1024 * 1024
+    # Cap on documents in the corpus; 0 means unlimited. When the cap is
+    # reached the oldest non-seeded document is evicted before a new upload.
+    max_documents: int = 0
+    # Directory of documents ingested at startup (public demo corpus). Seeded
+    # documents are never evicted.
+    demo_seed_dir: Optional[str] = None
     max_filename_length: int = 255
     max_extracted_chars: int = 2_000_000
     max_pdf_pages: int = 500
@@ -110,6 +119,14 @@ class Settings(BaseSettings):
 
     metrics_enabled: bool = True
 
+    # Rate limiting on /api routes (requests per sliding 60 s window; 0 disables).
+    # Per-client identity is the socket address, or the value of
+    # ``client_ip_header`` when the request carries a valid API key (the
+    # header is set by a trusted proxy that holds the key).
+    rate_limit_per_minute: int = 0
+    rate_limit_global_per_minute: int = 0
+    client_ip_header: str = "X-Client-IP"
+
     @field_validator("log_level")
     @classmethod
     def _upper_log_level(cls, value: str) -> str:
@@ -130,6 +147,10 @@ class Settings(BaseSettings):
             raise ValueError("search_top_k must not exceed max_top_k")
         if self.max_upload_size <= 0:
             raise ValueError("max_upload_size must be positive")
+        if self.max_documents < 0:
+            raise ValueError("max_documents must be >= 0")
+        if self.rate_limit_per_minute < 0 or self.rate_limit_global_per_minute < 0:
+            raise ValueError("rate limits must be >= 0")
         if self.api_key is not None and len(self.api_key) < 16:
             raise ValueError("api_key must be at least 16 characters")
         if self.embedding_provider == "openai" and not self.openai_api_key:

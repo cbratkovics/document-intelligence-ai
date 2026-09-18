@@ -156,6 +156,7 @@ class SearchHit:
     lexical_score: Optional[float] = None
     lexical_rank: Optional[int] = None
     fusion_score: Optional[float] = None
+    fusion_rank: Optional[int] = None  # position after fusion, before any reranking
     rerank_score: Optional[float] = None
     final_rank: Optional[int] = None
 
@@ -176,6 +177,7 @@ class SearchHit:
                 "lexical_score": self.lexical_score,
                 "lexical_rank": self.lexical_rank,
                 "fusion_score": self.fusion_score,
+                "fusion_rank": self.fusion_rank,
                 "rerank_score": self.rerank_score,
             },
             "rank": self.final_rank,
@@ -193,6 +195,7 @@ class RetrievalResult:
     corpus_generation: int
     timings_ms: Dict[str, float] = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    candidate_k: int = 0  # candidates requested from each retrieval branch
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -202,6 +205,7 @@ class RetrievalResult:
             "reranker": self.reranker,
             "scope": self.scope.to_dict(),
             "corpus_generation": self.corpus_generation,
+            "candidate_k": self.candidate_k,
             "timings_ms": self.timings_ms,
             "notes": list(self.notes),
         }

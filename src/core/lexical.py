@@ -11,6 +11,11 @@ Scoring is BM25 (k1=1.5, b=0.75) with the Lucene IDF variant
 size. (The ``rank_bm25`` package's Okapi variant yields non-positive scores
 when a term appears in every document, which makes one-document corpora
 unsearchable.) Scores are comparable only within one query.
+
+A short English stopword list is removed from documents and queries alike.
+Without it, on a small corpus, function words such as "what" or "does" carry
+enough IDF that a question containing no content term still produces lexical
+hits, and rank fusion then promotes that noise above genuine dense matches.
 """
 
 from __future__ import annotations
@@ -26,9 +31,19 @@ from .types import QueryScope
 
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
+STOPWORDS = frozenset(
+    """
+    a an and are as at be been by can could did do does for from had has have he her
+    his how i if in into is it its may might of on or our shall she should that the
+    their them then there these they this those to us was we were what when where
+    which who whom why will with would you your
+    """.split()
+)
+
 
 def tokenize(text: str) -> List[str]:
-    return _TOKEN_RE.findall(text.lower())
+    """Lowercased word tokens with stopwords removed (documents and queries alike)."""
+    return [t for t in _TOKEN_RE.findall(text.lower()) if t not in STOPWORDS]
 
 
 @dataclass(frozen=True)

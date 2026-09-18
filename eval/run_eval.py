@@ -6,6 +6,7 @@ Usage (from the repository root):
     python -m eval.run_eval --embedding hash                 # plumbing check of dense/hybrid
     python -m eval.run_eval --embedding openai --modes lexical,vector,hybrid   # paid
     python -m eval.run_eval --embedding local                # prepared local model
+    python -m eval.run_eval --embedding fastembed            # prepared ONNX model (demo runtime)
 
 Every run ingests the corpus into a disposable ephemeral index, runs each
 requested retrieval mode with identical queries, evaluates against the
@@ -312,7 +313,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help="Artifact path (default: eval/results/<timestamp>-<embedding>.json)",
     )
-    parser.add_argument("--embedding", default="none", choices=["none", "hash", "openai", "local"])
+    parser.add_argument(
+        "--embedding", default="none", choices=["none", "hash", "openai", "local", "fastembed"]
+    )
     parser.add_argument(
         "--reranker", default="none", choices=["none", "heuristic", "cross_encoder"]
     )
