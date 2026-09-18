@@ -14,6 +14,8 @@ with a public demo that shows exactly why each passage was retrieved.
 **Live demo:** [frontend-doc-intel.vercel.app](https://frontend-doc-intel.vercel.app) ·
 **API:** [huggingface.co/spaces/cbratkovics/document-intelligence-ai](https://huggingface.co/spaces/cbratkovics/document-intelligence-ai)
 
+![Live demo: clicking three example questions in turn, an exact error code, a paraphrase with no BM25 match, and a question that only rank fusion ranks first](docs/images/portfolio/demo.gif)
+
 ![Evidence view: the top passage with matched terms highlighted, then every retrieved chunk with its BM25, dense and fused rank side by side](docs/images/demo-hybrid.png)
 
 The demo is retrieval-only. It runs BM25 and a MiniLM dense retriever over a
