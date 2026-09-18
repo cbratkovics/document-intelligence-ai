@@ -57,24 +57,20 @@ Neither fault alone would have produced a nineteen hour outage.
 - The upstream team had no list of downstream consumers to notify.
 - Alert routing was changed by the monitoring migration without a test that
   a synthetic failure reaches a human.
-- Nobody owned a daily check that the finance mart had advanced.
+- Nobody owned a daily check that the finance mart had advanced, so the
+  frozen figures went unchallenged for most of a working day.
 
-## Action items
-
-The action items from INC-2024-031, each with an owner and a status:
-
-- AI-031-1 Replace every `SELECT *` load in the storefront pipeline with an
-  explicit column list. Owner: Data Platform. Done.
-- AI-031-2 Add a schema drift check (DQ-E205) that compares the raw table's
-  columns against the staging contract before each load. Owner: Data
-  Platform. Done.
-- AI-031-3 Route DQ-E417 and PIPE-410 to the paging rotation, not to chat, and
-  add a weekly synthetic alert that must be acknowledged. Owner: Platform
-  Reliability. Done.
-- AI-031-4 Publish a consumer registry so producing teams can see who reads
-  each raw table. Owner: Storefront Platform. In progress.
-- AI-031-5 Add a "mart advanced today" gate to the finance dashboard header
-  that turns red when the latest partition is older than two hours. Owner:
+## Action items (INC-2024-031)
+- AI-031-1 Replace every `SELECT *` load with an explicit column list.
+  Owner: Data Platform. Done.
+- AI-031-2 Add a schema drift check (DQ-E205) against the staging contract
+  before each load. Owner: Data Platform. Done.
+- AI-031-3 Route DQ-E417 and PIPE-410 to the paging rotation, with a weekly
+  synthetic alert that must be acknowledged. Owner: Platform Reliability. Done.
+- AI-031-4 Publish a consumer registry of who reads each raw table. Owner:
+  Storefront Platform. In progress.
+- AI-031-5 Add a "mart advanced today" gate to the finance dashboard that
+  turns red when the latest partition is older than two hours. Owner:
   Finance Analytics. Done.
 
 ## Lessons
