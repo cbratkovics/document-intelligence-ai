@@ -143,6 +143,13 @@ export default function Demo() {
     void runSearch(text, mode, rerank);
   }
 
+  function onChip(text: string) {
+    // Chips are the first thing most visitors click: show BM25, dense and
+    // fused ranks together regardless of a mode picked earlier.
+    setMode("hybrid");
+    void runSearch(text, "hybrid", rerank);
+  }
+
   function onModeChange(next: RetrievalMode) {
     setMode(next);
     if (asked) void runSearch(asked, next, rerank);
@@ -209,6 +216,7 @@ export default function Demo() {
           question={question}
           onQuestionChange={setQuestion}
           onAsk={onAsk}
+          onChip={onChip}
           onUpload={onUpload}
           uploadProgress={uploadProgress}
           uploadMessage={uploadMessage}

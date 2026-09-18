@@ -12,6 +12,8 @@ interface Props {
   question: string;
   onQuestionChange: (value: string) => void;
   onAsk: (question: string) => void;
+  /** Example chips always run in hybrid mode so all three rank columns are filled. */
+  onChip: (question: string) => void;
   onUpload: (file: File) => Promise<void>;
   uploadProgress: number | null;
   uploadMessage: { tone: "ok" | "bad" | "warn"; text: string } | null;
@@ -46,6 +48,7 @@ export default function Corpus({
   question,
   onQuestionChange,
   onAsk,
+  onChip,
   onUpload,
   uploadProgress,
   uploadMessage,
@@ -131,7 +134,7 @@ export default function Corpus({
               <button
                 type="button"
                 disabled={disabled}
-                onClick={() => onAsk(chip.text)}
+                onClick={() => onChip(chip.text)}
                 className="w-full rounded-md border border-line bg-surface px-3 py-2 text-left hover:border-accent disabled:opacity-50"
               >
                 <span className="block text-sm leading-5">{chip.text}</span>
