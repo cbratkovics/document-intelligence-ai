@@ -73,6 +73,8 @@ export interface SearchResponse {
   rerank_status: "applied" | "disabled" | "unavailable" | "failed";
   reranker: string | null;
   candidate_k: number;
+  /** What each branch actually returned; null for a branch that did not run. Absent on older APIs. */
+  candidates_returned?: { lexical: number | null; vector: number | null };
   timings_ms: Record<string, number>;
   notes: string[];
 }

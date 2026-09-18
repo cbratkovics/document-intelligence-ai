@@ -49,6 +49,17 @@ function Bar({ value, max, label }: { value: number | null; max: number; label: 
   );
 }
 
+/**
+ * Why a branch rank is missing. With the count a branch actually returned we
+ * can tell "the branch found nothing for this chunk" (it returned fewer than
+ * the pool, so every match is already ranked) from "ranked, but below the
+ * pool cut-off". Without the count (older API) only the pool wording is safe.
+ */
+export function missingRankLabel(label: string, poolSize: number, returned: number | null | undefined): string {
+  if (typeof returned === "number" && returned < poolSize) return `no ${label} match`;
+  return `outside top ${poolSize}`;
+}
+
 function RankCell({
   rank,
   score,
@@ -56,6 +67,7 @@ function RankCell({
   ran,
   label,
   poolSize,
+  returned,
   digits = 3,
 }: {
   rank: number | null;
@@ -64,6 +76,7 @@ function RankCell({
   ran: boolean;
   label: string;
   poolSize: number;
+  returned: number | null | undefined;
   digits?: number;
 }) {
   if (!ran) {
@@ -75,9 +88,10 @@ function RankCell({
     );
   }
   if (rank == null) {
+    const text = missingRankLabel(label, poolSize, returned);
     return (
-      <div className="flex flex-col gap-1" title={`Not among the top ${poolSize} ${label} candidates`}>
-        <span className="text-xs text-ink-3">outside top {poolSize}</span>
+      <div className="flex flex-col gap-1" title={text.startsWith("no ") ? `The ${label} branch did not retrieve this chunk at all` : `Ranked below the top ${poolSize} ${label} candidates`}>
+        <span className="text-xs text-ink-3">{text}</span>
         <div className="bar-track" aria-hidden />
       </div>
     );
@@ -117,6 +131,7 @@ function HitRow({
   maxima,
   ran,
   poolSize,
+  returned,
   terms,
   rerankApplied,
   loadContext,
@@ -125,6 +140,7 @@ function HitRow({
   maxima: { lexical: number; vector: number; fusion: number; rerank: number };
   ran: { lexical: boolean; vector: boolean; fusion: boolean };
   poolSize: number;
+  returned: { lexical: number | null; vector: number | null } | undefined;
   terms: string[];
   rerankApplied: boolean;
   loadContext: (hit: Hit) => Promise<Chunk[]>;
@@ -167,9 +183,9 @@ function HitRow({
           <span className="block truncate text-sm">{hit.text.replace(/\s+/g, " ").slice(0, 160)}</span>
         </span>
         <div className="col-span-2 grid grid-cols-3 gap-3 sm:col-span-3 sm:contents">
-          <RankCell rank={s.lexical_rank} score={s.lexical_score} max={maxima.lexical} ran={ran.lexical} label="BM25" poolSize={poolSize} digits={2} />
-          <RankCell rank={s.vector_rank} score={s.vector_similarity} max={maxima.vector} ran={ran.vector} label="dense" poolSize={poolSize} />
-          <RankCell rank={s.fusion_rank} score={s.fusion_score} max={maxima.fusion} ran={ran.fusion} label="fused" poolSize={poolSize} digits={4} />
+          <RankCell rank={s.lexical_rank} score={s.lexical_score} max={maxima.lexical} ran={ran.lexical} label="BM25" poolSize={poolSize} returned={returned?.lexical} digits={2} />
+          <RankCell rank={s.vector_rank} score={s.vector_similarity} max={maxima.vector} ran={ran.vector} label="dense" poolSize={poolSize} returned={returned?.vector} />
+          <RankCell rank={s.fusion_rank} score={s.fusion_score} max={maxima.fusion} ran={ran.fusion} label="fused" poolSize={poolSize} returned={undefined} digits={4} />
         </div>
       </button>
       <div id={panelId} hidden={!open} className="border-t border-line px-3 py-3">
@@ -331,7 +347,15 @@ export default function Evidence(props: EvidenceProps) {
               {results.mode_requested !== results.mode_effective && " (requested mode unavailable)"}
               {rerankApplied && ", then reranked"}
               {results.rerank_status === "failed" && ", rerank failed so fused order kept"}
-              . Top {hits.length} of {results.candidate_k} candidates per branch.
+              . Top {hits.length}
+              {results.candidates_returned
+                ? ` of ${[
+                    ran.lexical && results.candidates_returned.lexical != null ? `${results.candidates_returned.lexical} BM25` : null,
+                    ran.vector && results.candidates_returned.vector != null ? `${results.candidates_returned.vector} dense` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" and ")} candidates (pool ${results.candidate_k} per branch).`
+                : ` of ${results.candidate_k} candidates per branch.`}
             </span>
             {latencyMs != null && (
               <span className="tnum">
@@ -352,14 +376,14 @@ export default function Evidence(props: EvidenceProps) {
               <p className="whitespace-pre-wrap text-[15px] leading-7">{highlight(flowText(top.text), terms)}</p>
               <dl className="mt-3 grid grid-cols-3 gap-3 border-t border-line pt-3 text-xs">
                 {[
-                  { label: "BM25 rank", value: ran.lexical ? top.scores.lexical_rank : null, ranBranch: ran.lexical },
-                  { label: "Dense rank", value: ran.vector ? top.scores.vector_rank : null, ranBranch: ran.vector },
-                  { label: "Fused rank", value: ran.fusion ? top.scores.fusion_rank : null, ranBranch: ran.fusion },
+                  { label: "BM25 rank", value: ran.lexical ? top.scores.lexical_rank : null, ranBranch: ran.lexical, missing: missingRankLabel("BM25", results.candidate_k, results.candidates_returned?.lexical) },
+                  { label: "Dense rank", value: ran.vector ? top.scores.vector_rank : null, ranBranch: ran.vector, missing: missingRankLabel("dense", results.candidate_k, results.candidates_returned?.vector) },
+                  { label: "Fused rank", value: ran.fusion ? top.scores.fusion_rank : null, ranBranch: ran.fusion, missing: `outside top ${results.candidate_k}` },
                 ].map((cell) => (
                   <div key={cell.label}>
                     <dt className="text-ink-3">{cell.label}</dt>
                     <dd className="text-base font-semibold tnum">
-                      {!cell.ranBranch ? <span className="text-sm font-normal text-ink-3">not run</span> : cell.value ?? <span className="text-sm font-normal text-ink-3">outside top {results.candidate_k}</span>}
+                      {!cell.ranBranch ? <span className="text-sm font-normal text-ink-3">not run</span> : cell.value ?? <span className="text-sm font-normal text-ink-3">{cell.missing}</span>}
                     </dd>
                   </div>
                 ))}
@@ -382,6 +406,7 @@ export default function Evidence(props: EvidenceProps) {
                 maxima={maxima}
                 ran={ran}
                 poolSize={results.candidate_k}
+                returned={results.candidates_returned}
                 terms={terms}
                 rerankApplied={Boolean(rerankApplied)}
                 loadContext={loadContext}
